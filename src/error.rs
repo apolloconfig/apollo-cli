@@ -37,6 +37,9 @@ pub enum CliErrorKind {
     ProfileNotFound {
         profile: String,
     },
+    ProfileAlreadyExists {
+        profile: String,
+    },
 }
 
 #[derive(Debug)]
@@ -75,6 +78,15 @@ impl CliError {
     pub fn profile_not_found(profile: &str, format: OutputFormat) -> Self {
         Self {
             kind: CliErrorKind::ProfileNotFound {
+                profile: profile.to_owned(),
+            },
+            format,
+        }
+    }
+
+    pub fn profile_already_exists(profile: &str, format: OutputFormat) -> Self {
+        Self {
+            kind: CliErrorKind::ProfileAlreadyExists {
                 profile: profile.to_owned(),
             },
             format,
@@ -149,7 +161,8 @@ impl CliError {
             | CliErrorKind::AuthenticationRequired { .. }
             | CliErrorKind::Network { .. }
             | CliErrorKind::HttpStatus { .. }
-            | CliErrorKind::ProfileNotFound { .. } => 1,
+            | CliErrorKind::ProfileNotFound { .. }
+            | CliErrorKind::ProfileAlreadyExists { .. } => 1,
         }
     }
 
@@ -264,6 +277,19 @@ impl CliError {
                     message: format!("Profile '{}' was not found.", profile),
                     command: Some("profile".to_owned()),
                     follow_up_issue: Some(5629),
+                    path: None,
+                    profile: Some(profile.clone()),
+                }),
+            CliErrorKind::ProfileAlreadyExists { profile } => OutputWriter::new(self.format)
+                .render_error(&StructuredError {
+                    code: "profile_already_exists",
+                    category: "invalid_input",
+                    message: format!(
+                        "Profile '{}' already exists. Re-run with --overwrite to replace it.",
+                        profile
+                    ),
+                    command: Some("profile add".to_owned()),
+                    follow_up_issue: None,
                     path: None,
                     profile: Some(profile.clone()),
                 }),

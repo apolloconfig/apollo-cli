@@ -9,6 +9,7 @@ fn help_lists_v0_command_groups_and_global_flags() {
         .arg("--help")
         .assert()
         .success()
+        .stdout(predicate::str::contains("init"))
         .stdout(predicate::str::contains("auth"))
         .stdout(predicate::str::contains("profile"))
         .stdout(predicate::str::contains("app"))
@@ -76,4 +77,15 @@ fn auth_help_lists_v0_auth_commands() {
         .stdout(predicate::str::contains("login"))
         .stdout(predicate::str::contains("status"))
         .stdout(predicate::str::contains("logout"));
+}
+
+#[test]
+fn profile_help_lists_add_command() {
+    Command::cargo_bin("apollo")
+        .expect("apollo binary")
+        .args(["profile", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("add"))
+        .stdout(predicate::str::contains("use"));
 }

@@ -37,6 +37,7 @@ pub enum OutputFormat {
 
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
 pub enum Commands {
+    Init(InitArgs),
     Auth {
         #[command(subcommand)]
         command: AuthCommand,
@@ -70,9 +71,39 @@ pub enum Commands {
 
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
 pub enum ProfileCommand {
+    Add(ProfileAddArgs),
     List,
     Show,
     Use { name: String },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Args)]
+pub struct InitArgs {
+    #[arg(long)]
+    pub name: Option<String>,
+    #[arg(long)]
+    pub operator: Option<String>,
+    #[arg(long)]
+    pub token_stdin: bool,
+    #[arg(long)]
+    pub store_token_in_file: bool,
+    #[arg(long)]
+    pub overwrite: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Args)]
+pub struct ProfileAddArgs {
+    pub name: Option<String>,
+    #[arg(long)]
+    pub operator: Option<String>,
+    #[arg(long)]
+    pub token_stdin: bool,
+    #[arg(long)]
+    pub store_token_in_file: bool,
+    #[arg(long)]
+    pub overwrite: bool,
+    #[arg(long = "use")]
+    pub use_profile: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]

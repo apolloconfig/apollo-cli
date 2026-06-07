@@ -37,6 +37,9 @@ changes in this slice.
 Representative v0 commands:
 
 ```bash
+apollo init
+apollo profile add dev
+apollo profile add prod --use
 apollo app list
 apollo app get sample-app
 apollo env list
@@ -68,6 +71,43 @@ The current scaffold parses these global flags before subcommands:
 - `--output json|table`
 - `--yes`
 
+## Guided setup
+
+Use `apollo init` for first-time setup. It creates a profile, writes non-secret profile metadata to
+`config.toml`, and can store a Consumer token through the credential-store abstraction.
+
+For local Apollo assembly testing:
+
+```bash
+printf '%s\n' "$TOKEN" | apollo --output json init --token-stdin --store-token-in-file
+apollo profile show
+apollo env list
+```
+
+By default, `apollo init` creates a `local` profile with:
+
+- `server = "http://127.0.0.1:8070"`
+- `output = "json"`
+- `operator = "apollo"`
+- `active_profile = "local"`
+
+Use `apollo profile add` to add more environments without hand-editing config:
+
+```bash
+printf '%s\n' "$DEV_TOKEN" | apollo \
+  --server https://apollo-dev.example.com \
+  --output json \
+  profile add dev \
+  --operator alice \
+  --token-stdin
+
+apollo profile add prod --server https://apollo-prod.example.com --operator alice --use
+```
+
+`profile add` does not switch the active profile by default. Pass `--use` when the newly added
+profile should become active. Existing profiles are protected from accidental replacement; pass
+`--overwrite` to replace one intentionally.
+
 ## Profile config
 
 The CLI stores non-secret profile metadata in `config.toml` under the OS config directory:
@@ -85,7 +125,8 @@ The config file stores:
 - optional `operator`
 - optional credential lookup metadata, such as backend/key names
 
-Tokens are intentionally not part of the supported config schema.
+Tokens are intentionally not part of the supported config schema. Prefer `apollo init`,
+`apollo profile add`, and `apollo auth login` over editing this file by hand.
 
 Example:
 
@@ -104,6 +145,8 @@ key = "dev"
 
 ## Profile commands
 
+- `apollo init`
+- `apollo profile add [name]`
 - `apollo profile list`
 - `apollo profile show`
 - `apollo profile use <name>`

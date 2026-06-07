@@ -1,9 +1,11 @@
+use std::io::{self, IsTerminal, Write};
+
 use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::cli::{
-    ApiArgs, AppCommand, AuthCommand, Cli, Commands, ConfigCommand, EnvCommand, NamespaceCommand,
-    NamespaceScopeArgs, OutputFormat, ProfileCommand, ReleaseCommand,
+    ApiArgs, AppCommand, AuthCommand, Cli, Commands, ConfigCommand, EnvCommand, InitArgs,
+    NamespaceCommand, NamespaceScopeArgs, OutputFormat, ProfileCommand, ReleaseCommand,
 };
 use crate::config::{
     CredentialRef, LoadedConfig, ProfileConfig, RuntimeContext, load_config, resolve_context,
@@ -13,14 +15,19 @@ use crate::credential;
 use crate::error::CliError;
 use crate::http::{OpenApiClient, OpenApiResponse, append_query, encode_path_segment};
 use crate::output::{OutputWriter, RenderedOutput};
+use crate::redaction::Sensitive;
 
 const DEFAULT_PAGE: u32 = 0;
 const DEFAULT_PAGE_SIZE: u32 = 20;
+const DEFAULT_INIT_PROFILE: &str = "local";
+const DEFAULT_INIT_SERVER: &str = "http://127.0.0.1:8070";
+const DEFAULT_INIT_OPERATOR: &str = "apollo";
 
 pub fn execute(cli: Cli) -> Result<RenderedOutput, CliError> {
     let output = cli.global.output.unwrap_or(OutputFormat::Table);
 
     match &cli.command {
+        Commands::Init(args) => execute_init(args.clone(), &cli, output),
         Commands::Auth { command } => execute_auth(command.clone(), &cli, output),
         Commands::Profile { command } => execute_profile(command.clone(), &cli, output),
         Commands::App { command } => execute_app(command.clone(), &cli, output),
@@ -30,6 +37,23 @@ pub fn execute(cli: Cli) -> Result<RenderedOutput, CliError> {
         Commands::Release { command } => execute_release(command.clone(), &cli, output),
         Commands::Api(args) => execute_api(args.clone(), &cli, output),
     }
+}
+
+fn execute_init(
+    args: InitArgs,
+    cli: &Cli,
+    output: OutputFormat,
+) -> Result<RenderedOutput, CliError> {
+    let options = ProfileSetupOptions {
+        mode: ProfileSetupMode::Init,
+        name: args.name,
+        operator: args.operator,
+        token_stdin: args.token_stdin,
+        store_token_in_file: args.store_token_in_file,
+        overwrite: args.overwrite,
+        use_profile: true,
+    };
+    execute_profile_setup(options, cli, output)
 }
 
 fn execute_auth(
@@ -124,6 +148,18 @@ fn execute_profile(
     let writer = OutputWriter::new(resolve_output(cli, &loaded, output)?);
 
     match command {
+        ProfileCommand::Add(args) => {
+            let options = ProfileSetupOptions {
+                mode: ProfileSetupMode::Add,
+                name: args.name,
+                operator: args.operator,
+                token_stdin: args.token_stdin,
+                store_token_in_file: args.store_token_in_file,
+                overwrite: args.overwrite,
+                use_profile: args.use_profile,
+            };
+            execute_profile_setup(options, cli, output)
+        }
         ProfileCommand::List => {
             let response = ProfileListResponse::from_loaded_config(&loaded);
             Ok(writer.render_success(&response, response.render_table()))
@@ -156,6 +192,89 @@ fn execute_profile(
             ))
         }
     }
+}
+
+#[derive(Copy, Clone)]
+enum ProfileSetupMode {
+    Init,
+    Add,
+}
+
+struct ProfileSetupOptions {
+    mode: ProfileSetupMode,
+    name: Option<String>,
+    operator: Option<String>,
+    token_stdin: bool,
+    store_token_in_file: bool,
+    overwrite: bool,
+    use_profile: bool,
+}
+
+fn execute_profile_setup(
+    options: ProfileSetupOptions,
+    cli: &Cli,
+    output: OutputFormat,
+) -> Result<RenderedOutput, CliError> {
+    let loaded = load_config(output)?;
+    let writer_output = resolve_output(cli, &loaded, output)?;
+    let writer = OutputWriter::new(writer_output);
+    let interactive = is_interactive_terminal();
+
+    let profile_name = resolve_setup_profile_name(&options, cli, interactive, writer_output)?;
+    if loaded.config.profiles.contains_key(&profile_name) && !options.overwrite {
+        return Err(CliError::profile_already_exists(
+            &profile_name,
+            writer_output,
+        ));
+    }
+
+    let server = resolve_setup_server(&options, cli, interactive, writer_output)?;
+    let profile_output = cli.global.output.unwrap_or(OutputFormat::Json);
+    let operator = resolve_setup_operator(&options, interactive, writer_output)?;
+
+    let mut profile_config = ProfileConfig {
+        server: Some(server.clone()),
+        output: Some(profile_output),
+        operator: operator.clone(),
+        credential: None,
+    };
+
+    let credential = resolve_setup_token(&options, interactive, writer_output)?
+        .map(|token| {
+            store_setup_token(
+                &loaded.path,
+                &profile_name,
+                &token,
+                options.store_token_in_file,
+                interactive,
+                writer_output,
+            )
+        })
+        .transpose()?;
+    profile_config.credential = credential.clone();
+
+    let mut config = loaded.config.clone();
+    config.profiles.insert(profile_name.clone(), profile_config);
+    let should_set_active = options.use_profile || config.active_profile.is_none();
+    if should_set_active {
+        config.active_profile = Some(profile_name.clone());
+    }
+    save_config(&loaded.path, &config, writer_output)?;
+
+    let response = ProfileSetupResponse {
+        profile: profile_name,
+        active_profile: config.active_profile.clone(),
+        server,
+        output: profile_output.to_string(),
+        operator,
+        credential,
+        config_path: loaded.path.display().to_string(),
+        next_steps: vec![
+            "apollo profile show".to_owned(),
+            "apollo env list".to_owned(),
+        ],
+    };
+    Ok(writer.render_success(&response, response.render_table()))
 }
 
 fn execute_app(
@@ -530,6 +649,210 @@ fn sync_body(
     })
 }
 
+fn resolve_setup_profile_name(
+    options: &ProfileSetupOptions,
+    cli: &Cli,
+    interactive: bool,
+    output: OutputFormat,
+) -> Result<String, CliError> {
+    options
+        .name
+        .clone()
+        .or_else(|| cli.global.profile.clone())
+        .or_else(|| match options.mode {
+            ProfileSetupMode::Init => Some(DEFAULT_INIT_PROFILE.to_owned()),
+            ProfileSetupMode::Add => None,
+        })
+        .map(Ok)
+        .unwrap_or_else(|| {
+            if interactive {
+                prompt_required("Profile name", None, output)
+            } else {
+                Err(CliError::invalid_input(
+                    "provide a profile name, for example `apollo profile add dev --server ...`",
+                    output,
+                ))
+            }
+        })
+}
+
+fn resolve_setup_server(
+    options: &ProfileSetupOptions,
+    cli: &Cli,
+    interactive: bool,
+    output: OutputFormat,
+) -> Result<String, CliError> {
+    cli.global
+        .server
+        .clone()
+        .or_else(|| match options.mode {
+            ProfileSetupMode::Init => Some(DEFAULT_INIT_SERVER.to_owned()),
+            ProfileSetupMode::Add => None,
+        })
+        .map(Ok)
+        .unwrap_or_else(|| {
+            if interactive {
+                prompt_required("Apollo Portal server URL", None, output)
+            } else {
+                Err(CliError::invalid_input(
+                    "provide a server with --server when adding a profile non-interactively",
+                    output,
+                ))
+            }
+        })
+}
+
+fn resolve_setup_operator(
+    options: &ProfileSetupOptions,
+    interactive: bool,
+    output: OutputFormat,
+) -> Result<Option<String>, CliError> {
+    if let Some(operator) = &options.operator {
+        return Ok(Some(operator.clone()));
+    }
+    if matches!(options.mode, ProfileSetupMode::Init) {
+        return Ok(Some(DEFAULT_INIT_OPERATOR.to_owned()));
+    }
+    if interactive {
+        prompt_optional("Default operator", output)
+    } else {
+        Ok(None)
+    }
+}
+
+fn resolve_setup_token(
+    options: &ProfileSetupOptions,
+    interactive: bool,
+    output: OutputFormat,
+) -> Result<Option<Sensitive>, CliError> {
+    if options.token_stdin {
+        return credential::token_from_env_or_stdin(true, output).map(Some);
+    }
+    if interactive && prompt_yes_no("Store a Consumer token now?", false, output)? {
+        let token = rpassword::prompt_password("Consumer token: ")
+            .map_err(|error| CliError::invalid_input(&error.to_string(), output))?;
+        let token = token.trim().to_owned();
+        if token.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(Sensitive::new(token)))
+        }
+    } else {
+        Ok(None)
+    }
+}
+
+fn store_setup_token(
+    config_path: &std::path::Path,
+    profile: &str,
+    token: &Sensitive,
+    store_token_in_file: bool,
+    interactive: bool,
+    output: OutputFormat,
+) -> Result<CredentialRef, CliError> {
+    if store_token_in_file {
+        return credential::store_file(config_path, profile, token)
+            .map_err(|error| CliError::credential_store_unavailable(&error, output));
+    }
+
+    match credential::store_native(profile, token) {
+        Ok(credential) => Ok(credential),
+        Err(error) => {
+            if interactive
+                && prompt_yes_no(
+                    "Native credential storage is unavailable. Store token in a local file instead?",
+                    false,
+                    output,
+                )?
+            {
+                credential::store_file(config_path, profile, token)
+                    .map_err(|error| CliError::credential_store_unavailable(&error, output))
+            } else {
+                Err(CliError::confirmation_required(
+                    &format!(
+                        "Native credential storage is unavailable: {}. Re-run with --store-token-in-file to use the explicit file fallback.",
+                        error
+                    ),
+                    output,
+                ))
+            }
+        }
+    }
+}
+
+fn is_interactive_terminal() -> bool {
+    io::stdin().is_terminal() && io::stderr().is_terminal()
+}
+
+fn prompt_required(
+    label: &str,
+    default: Option<&str>,
+    output: OutputFormat,
+) -> Result<String, CliError> {
+    loop {
+        let value = prompt_line(label, default, output)?;
+        if !value.trim().is_empty() {
+            return Ok(value.trim().to_owned());
+        }
+        eprintln!("{} is required.", label);
+    }
+}
+
+fn prompt_optional(label: &str, output: OutputFormat) -> Result<Option<String>, CliError> {
+    let value = prompt_line(label, None, output)?;
+    let value = value.trim().to_owned();
+    Ok((!value.is_empty()).then_some(value))
+}
+
+fn prompt_yes_no(label: &str, default: bool, output: OutputFormat) -> Result<bool, CliError> {
+    let suffix = if default { "[Y/n]" } else { "[y/N]" };
+    loop {
+        eprint!("{} {} ", label, suffix);
+        io::stderr()
+            .flush()
+            .map_err(|error| CliError::invalid_input(&error.to_string(), output))?;
+        let mut line = String::new();
+        io::stdin()
+            .read_line(&mut line)
+            .map_err(|error| CliError::invalid_input(&error.to_string(), output))?;
+        let value = line.trim().to_ascii_lowercase();
+        if value.is_empty() {
+            return Ok(default);
+        }
+        match value.as_str() {
+            "y" | "yes" => return Ok(true),
+            "n" | "no" => return Ok(false),
+            _ => eprintln!("Please answer y or n."),
+        }
+    }
+}
+
+fn prompt_line(
+    label: &str,
+    default: Option<&str>,
+    output: OutputFormat,
+) -> Result<String, CliError> {
+    if let Some(default) = default {
+        eprint!("{} [{}]: ", label, default);
+    } else {
+        eprint!("{}: ", label);
+    }
+    io::stderr()
+        .flush()
+        .map_err(|error| CliError::invalid_input(&error.to_string(), output))?;
+
+    let mut line = String::new();
+    io::stdin()
+        .read_line(&mut line)
+        .map_err(|error| CliError::invalid_input(&error.to_string(), output))?;
+    let value = line.trim();
+    if value.is_empty() {
+        Ok(default.unwrap_or_default().to_owned())
+    } else {
+        Ok(value.to_owned())
+    }
+}
+
 #[derive(Serialize)]
 struct ProfileListResponse {
     #[serde(rename = "activeProfile")]
@@ -674,6 +997,51 @@ struct ProfileUseResponse {
     active_profile: String,
     #[serde(rename = "configPath")]
     config_path: String,
+}
+
+#[derive(Serialize)]
+struct ProfileSetupResponse {
+    profile: String,
+    active_profile: Option<String>,
+    server: String,
+    output: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    operator: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    credential: Option<CredentialRef>,
+    config_path: String,
+    next_steps: Vec<String>,
+}
+
+impl ProfileSetupResponse {
+    fn render_table(&self) -> String {
+        let mut lines = vec![
+            format!("Profile '{}' configured.", self.profile),
+            format!("Config path: {}", self.config_path),
+            format!("Server: {}", self.server),
+            format!("Output: {}", self.output),
+        ];
+        if self.active_profile.as_deref() == Some(self.profile.as_str()) {
+            lines.push("Active profile: yes".to_owned());
+        }
+        if let Some(operator) = &self.operator {
+            lines.push(format!("Operator: {}", operator));
+        }
+        if let Some(credential) = &self.credential {
+            lines.push(format!("Credential backend: {}", credential.backend));
+            lines.push(format!("Credential key: {}", credential.key));
+        } else {
+            lines.push("Credential: not configured".to_owned());
+            lines.push(
+                "Run `apollo auth login --token-stdin` when you have a Consumer token.".to_owned(),
+            );
+        }
+        if !self.next_steps.is_empty() {
+            lines.push("Next steps:".to_owned());
+            lines.extend(self.next_steps.iter().map(|step| format!("  {}", step)));
+        }
+        lines.join("\n")
+    }
 }
 
 #[derive(Serialize)]

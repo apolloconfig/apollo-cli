@@ -2,6 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use assert_cmd::Command;
+use predicates::prelude::predicate;
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -228,13 +229,163 @@ output = "table"
     assert_eq!(json["error"]["profile"], "prod");
 }
 
+#[test]
+fn init_creates_local_profile_and_file_credential_without_printing_token() {
+    let home = temp_home();
+
+    let assert = base_command(&home)
+        .write_stdin("secret-from-stdin\n")
+        .args([
+            "--output",
+            "json",
+            "init",
+            "--token-stdin",
+            "--store-token-in-file",
+        ])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let json: Value = serde_json::from_str(&stdout).expect("json stdout");
+
+    assert_eq!(json["profile"], "local");
+    assert_eq!(json["active_profile"], "local");
+    assert_eq!(json["server"], "http://127.0.0.1:8070");
+    assert_eq!(json["credential"]["backend"], "file");
+    assert!(!stdout.contains("secret-from-stdin"));
+
+    let config = fs::read_to_string(config_path(&home)).expect("config file");
+    assert!(config.contains("active_profile = \"local\""));
+    assert!(config.contains("[profiles.local]"));
+    assert!(config.contains("server = \"http://127.0.0.1:8070\""));
+    assert!(config.contains("output = \"json\""));
+    assert!(config.contains("operator = \"apollo\""));
+    assert!(config.contains("backend = \"file\""));
+    assert!(!config.contains("secret-from-stdin"));
+    assert!(credential_file_path(&home, "local").exists());
+}
+
+#[test]
+fn profile_add_creates_profile_without_switching_active_profile() {
+    let home = temp_home();
+    write_config(
+        &home,
+        r#"
+active_profile = "local"
+
+[profiles.local]
+server = "http://127.0.0.1:8070"
+output = "json"
+"#,
+    );
+
+    let assert = base_command(&home)
+        .write_stdin("secret-from-stdin\n")
+        .args([
+            "--server",
+            "https://apollo-dev.example.com",
+            "--output",
+            "json",
+            "profile",
+            "add",
+            "dev",
+            "--operator",
+            "dev-operator",
+            "--token-stdin",
+            "--store-token-in-file",
+        ])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let json: Value = serde_json::from_str(&stdout).expect("json stdout");
+
+    assert_eq!(json["profile"], "dev");
+    assert_eq!(json["active_profile"], "local");
+    assert_eq!(json["server"], "https://apollo-dev.example.com");
+    assert_eq!(json["operator"], "dev-operator");
+    assert_eq!(json["credential"]["backend"], "file");
+    assert!(!stdout.contains("secret-from-stdin"));
+
+    let config = fs::read_to_string(config_path(&home)).expect("config file");
+    assert!(config.contains("active_profile = \"local\""));
+    assert!(config.contains("[profiles.local]"));
+    assert!(config.contains("[profiles.dev]"));
+    assert!(config.contains("server = \"https://apollo-dev.example.com\""));
+    assert!(config.contains("operator = \"dev-operator\""));
+    assert!(!config.contains("secret-from-stdin"));
+    assert!(credential_file_path(&home, "dev").exists());
+}
+
+#[test]
+fn profile_add_with_use_sets_active_profile() {
+    let home = temp_home();
+    write_config(
+        &home,
+        r#"
+active_profile = "local"
+
+[profiles.local]
+server = "http://127.0.0.1:8070"
+output = "json"
+"#,
+    );
+
+    base_command(&home)
+        .args([
+            "--server",
+            "https://apollo-prod.example.com",
+            "profile",
+            "add",
+            "prod",
+            "--use",
+        ])
+        .assert()
+        .success();
+
+    let config = fs::read_to_string(config_path(&home)).expect("config file");
+    assert!(config.contains("active_profile = \"prod\""));
+    assert!(config.contains("[profiles.prod]"));
+}
+
+#[test]
+fn profile_add_refuses_existing_profile_without_overwrite() {
+    let home = temp_home();
+    write_config(
+        &home,
+        r#"
+active_profile = "dev"
+
+[profiles.dev]
+server = "https://apollo-dev.example.com"
+output = "json"
+"#,
+    );
+
+    base_command(&home)
+        .args([
+            "--output",
+            "json",
+            "--server",
+            "https://apollo-new.example.com",
+            "profile",
+            "add",
+            "dev",
+        ])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("profile_already_exists"));
+}
+
 fn base_command(home: &TempDir) -> Command {
     let mut command = Command::cargo_bin("apollo").expect("apollo binary");
     command.env_remove("APOLLO_PROFILE");
     command.env_remove("APOLLO_SERVER");
     command.env_remove("APOLLO_OUTPUT");
+    command.env_remove("APOLLO_TOKEN");
     command.env_remove("XDG_CONFIG_HOME");
     command.env_remove("APPDATA");
+    command.env("APOLLO_CLI_TEST_DISABLE_NATIVE", "1");
     command.env("HOME", home.path());
     if cfg!(target_os = "linux") {
         command.env("XDG_CONFIG_HOME", home.path().join(".config"));
@@ -251,6 +402,13 @@ fn temp_home() -> TempDir {
 
 fn config_path(home: &TempDir) -> PathBuf {
     config_root(home).join("apollo").join("config.toml")
+}
+
+fn credential_file_path(home: &TempDir, key: &str) -> PathBuf {
+    config_root(home)
+        .join("apollo")
+        .join("credentials")
+        .join(format!("{}.token", key))
 }
 
 fn config_root(home: &TempDir) -> PathBuf {
