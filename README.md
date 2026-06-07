@@ -203,6 +203,9 @@ apollo --profile dev auth login
 apollo --profile dev app list
 ```
 
+`auth login` stores the token in the OS credential store by default. If the native store is not
+available in an interactive terminal, the CLI asks whether to use the local file fallback instead.
+
 For scripts or manual paste-with-enter workflows, `--token-stdin` reads one token line:
 
 ```bash

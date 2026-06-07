@@ -1,7 +1,12 @@
 use std::env;
 use std::fs;
-use std::io::{BufRead, IsTerminal};
+use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
+
+#[cfg(unix)]
+use std::mem;
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -220,15 +225,97 @@ pub fn token_from_env_or_stdin(
     }
 
     if std::io::stdin().is_terminal() && std::io::stderr().is_terminal() {
-        let token = rpassword::prompt_password("Consumer token: ")
-            .map_err(|error| CliError::invalid_input(&error.to_string(), format))?;
-        return token_from_value(token, format);
+        return prompt_token(format);
     }
 
     Err(CliError::invalid_input(
         "provide a token with interactive prompt, --token-stdin, or APOLLO_TOKEN",
         format,
     ))
+}
+
+pub fn prompt_token(format: crate::cli::OutputFormat) -> Result<Sensitive, CliError> {
+    let token = prompt_hidden("Consumer token: ", format)?;
+    token_from_value(token, format)
+}
+
+#[cfg(unix)]
+fn prompt_hidden(prompt: &str, format: crate::cli::OutputFormat) -> Result<String, CliError> {
+    let stdin = std::io::stdin();
+    let fd = stdin.as_raw_fd();
+    let mut stderr = std::io::stderr().lock();
+
+    stderr
+        .write_all(prompt.as_bytes())
+        .and_then(|()| stderr.flush())
+        .map_err(|error| CliError::invalid_input(&error.to_string(), format))?;
+
+    let mut echo_guard = TerminalEchoGuard::disable(fd, format)?;
+    let mut token = String::new();
+    let read_result = stdin.lock().read_line(&mut token);
+    echo_guard.restore();
+    writeln!(stderr).map_err(|error| CliError::invalid_input(&error.to_string(), format))?;
+
+    read_result.map_err(|error| CliError::invalid_input(&error.to_string(), format))?;
+    Ok(token)
+}
+
+#[cfg(unix)]
+struct TerminalEchoGuard {
+    fd: libc::c_int,
+    original: libc::termios,
+    active: bool,
+}
+
+#[cfg(unix)]
+impl TerminalEchoGuard {
+    fn disable(fd: libc::c_int, format: crate::cli::OutputFormat) -> Result<Self, CliError> {
+        let original = unsafe {
+            let mut term = mem::MaybeUninit::<libc::termios>::uninit();
+            if libc::tcgetattr(fd, term.as_mut_ptr()) != 0 {
+                return Err(CliError::invalid_input(
+                    &std::io::Error::last_os_error().to_string(),
+                    format,
+                ));
+            }
+            term.assume_init()
+        };
+        let mut hidden = original;
+        hidden.c_lflag &= !libc::ECHO;
+        if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &hidden) } != 0 {
+            return Err(CliError::invalid_input(
+                &std::io::Error::last_os_error().to_string(),
+                format,
+            ));
+        }
+        Ok(Self {
+            fd,
+            original,
+            active: true,
+        })
+    }
+
+    fn restore(&mut self) {
+        if self.active {
+            unsafe {
+                libc::tcsetattr(self.fd, libc::TCSANOW, &self.original);
+            }
+            self.active = false;
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for TerminalEchoGuard {
+    fn drop(&mut self) {
+        self.restore();
+    }
+}
+
+#[cfg(not(unix))]
+fn prompt_hidden(prompt: &str, format: crate::cli::OutputFormat) -> Result<String, CliError> {
+    rpassword::prompt_password(prompt)
+        .map_err(|error| CliError::invalid_input(&error.to_string(), format))
 }
 
 fn token_from_reader<R: BufRead>(

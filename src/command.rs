@@ -87,21 +87,14 @@ fn execute_auth(
             let profile = required_profile(&context, output)?;
             let token = credential::token_from_env_or_stdin(token_stdin, writer_output)?;
 
-            let credential_ref = if store_token_in_file {
-                credential::store_file(&loaded.path, &profile, &token).map_err(|error| {
-                    CliError::credential_store_unavailable(&error, writer_output)
-                })?
-            } else {
-                credential::store_native(&profile, &token).map_err(|error| {
-                    CliError::confirmation_required(
-                        &format!(
-                            "Native credential storage is unavailable: {}. Re-run with --store-token-in-file to use the explicit file fallback.",
-                            error
-                        ),
-                        writer_output,
-                    )
-                })?
-            };
+            let credential_ref = store_setup_token(
+                &loaded.path,
+                &profile,
+                &token,
+                store_token_in_file,
+                is_interactive_terminal(),
+                writer_output,
+            )?;
 
             let mut config = loaded.config.clone();
             let profile_config = config
@@ -742,14 +735,7 @@ fn resolve_setup_token(
         return credential::token_from_env_or_stdin(true, output).map(Some);
     }
     if interactive && prompt_yes_no("Store a Consumer token now?", false, output)? {
-        let token = rpassword::prompt_password("Consumer token: ")
-            .map_err(|error| CliError::invalid_input(&error.to_string(), output))?;
-        let token = token.trim().to_owned();
-        if token.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(Sensitive::new(token)))
-        }
+        credential::prompt_token(output).map(Some)
     } else {
         Ok(None)
     }

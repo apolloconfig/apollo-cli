@@ -74,6 +74,7 @@ dependencies = [
  "assert_cmd",
  "clap",
  "keyring",
+ "libc",
  "predicates",
  "regex",
  "reqwest",
