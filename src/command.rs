@@ -122,17 +122,30 @@ fn execute_auth(
         AuthCommand::Logout => {
             let context = resolve_context(cli, &loaded, output)?;
             let profile = required_profile(&context, output)?;
+            let environment_token_still_active = std::env::var("APOLLO_TOKEN")
+                .ok()
+                .is_some_and(|token| !token.trim().is_empty());
             let credential_ref = context.credential.clone().unwrap_or_else(|| CredentialRef {
                 backend: "native".to_owned(),
                 key: profile.clone(),
             });
             credential::delete(&loaded.path, &credential_ref)
                 .map_err(|error| CliError::credential_store_unavailable(&error, writer_output))?;
+            let message = if environment_token_still_active {
+                Some(
+                    "Local credential was removed, but APOLLO_TOKEN is still set and will continue to authenticate commands in this shell. Run `unset APOLLO_TOKEN` to disable it."
+                        .to_owned(),
+                )
+            } else {
+                None
+            };
             let response = AuthLogoutResponse {
                 logged_out: true,
                 profile,
                 backend: credential_ref.backend,
                 key: credential_ref.key,
+                environment_token_still_active,
+                message,
             };
             Ok(writer.render_success(&response, response.render_table()))
         }
@@ -1093,14 +1106,23 @@ struct AuthLogoutResponse {
     profile: String,
     backend: String,
     key: String,
+    #[serde(rename = "environmentCredentialStillActive")]
+    environment_token_still_active: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
 }
 
 impl AuthLogoutResponse {
     fn render_table(&self) -> String {
-        format!(
+        let mut body = format!(
             "Credential removed for profile '{}'.\nBackend: {}\nKey: {}",
             self.profile, self.backend, self.key
-        )
+        );
+        if let Some(message) = &self.message {
+            body.push('\n');
+            body.push_str(message);
+        }
+        body
     }
 }
 

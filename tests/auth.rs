@@ -179,6 +179,48 @@ key = "dev"
     assert!(!config.contains("secret-from-file"));
 }
 
+#[test]
+fn auth_logout_warns_when_apollo_token_environment_still_applies() {
+    let home = temp_home();
+    write_config(
+        &home,
+        r#"
+active_profile = "dev"
+
+[profiles.dev]
+server = "https://apollo-dev.example.com"
+
+[profiles.dev.credential]
+backend = "file"
+key = "dev"
+"#,
+    );
+    fs::create_dir_all(credential_file_path(&home, "dev").parent().expect("parent"))
+        .expect("credential dir");
+    fs::write(credential_file_path(&home, "dev"), "secret-from-file\n").expect("credential file");
+
+    let assert = base_command(&home)
+        .env("APOLLO_TOKEN", "secret-from-env")
+        .args(["--output", "json", "auth", "logout"])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let json: Value = serde_json::from_str(&stdout).expect("json stdout");
+
+    assert_eq!(json["loggedOut"], true);
+    assert_eq!(json["environmentCredentialStillActive"], true);
+    assert!(
+        json["message"]
+            .as_str()
+            .expect("message")
+            .contains("APOLLO_TOKEN")
+    );
+    assert!(!stdout.contains("secret-from-env"));
+    assert!(!stdout.contains("secret-from-file"));
+    assert!(!credential_file_path(&home, "dev").exists());
+}
+
 fn base_command(home: &TempDir) -> Command {
     let mut command = Command::cargo_bin("apollo").expect("apollo binary");
     command.env_remove("APOLLO_PROFILE");

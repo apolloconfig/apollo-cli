@@ -190,6 +190,11 @@ For local or CI use, `APOLLO_TOKEN` takes precedence and is never written to dis
 APOLLO_TOKEN="$TOKEN" apollo --server http://localhost:8070 app list --output json
 ```
 
+`apollo auth logout` removes the credential referenced by the selected profile. It cannot remove
+`APOLLO_TOKEN` from the parent shell environment. When `APOLLO_TOKEN` is still set, logout reports
+that environment credentials will continue to apply; run `unset APOLLO_TOKEN` to disable that
+temporary credential.
+
 For interactive use, configure a profile and store the token:
 
 ```bash
