@@ -14,6 +14,9 @@ use crate::error::CliError;
 use crate::http::{OpenApiClient, OpenApiResponse, append_query, encode_path_segment};
 use crate::output::{OutputWriter, RenderedOutput};
 
+const DEFAULT_PAGE: u32 = 0;
+const DEFAULT_PAGE_SIZE: u32 = 20;
+
 pub fn execute(cli: Cli) -> Result<RenderedOutput, CliError> {
     let output = cli.global.output.unwrap_or(OutputFormat::Table);
 
@@ -229,12 +232,8 @@ fn execute_config(
     match command {
         ConfigCommand::List { scope, page, size } => {
             let mut path = format!("{}/items", namespace_path(&scope));
-            if let Some(page) = page {
-                path = append_query(path, "page", &page.to_string());
-            }
-            if let Some(size) = size {
-                path = append_query(path, "size", &size.to_string());
-            }
+            path = append_query(path, "page", &page.unwrap_or(DEFAULT_PAGE).to_string());
+            path = append_query(path, "size", &size.unwrap_or(DEFAULT_PAGE_SIZE).to_string());
             openapi.request("GET", &path, None)
         }
         ConfigCommand::Get { scope, key } => {
@@ -254,7 +253,7 @@ fn execute_config(
         } => {
             require_yes(cli, output)?;
             let operator = required_operator(operator.as_deref(), &openapi.context, output)?;
-            let path = append_query(
+            let update_path = append_query(
                 format!(
                     "{}/items/{}",
                     namespace_path(&scope),
@@ -263,6 +262,11 @@ fn execute_config(
                 "createIfNotExists",
                 "true",
             );
+            let create_path = append_query(
+                format!("{}/items", namespace_path(&scope)),
+                "operator",
+                &operator,
+            );
             let body = json!({
                 "key": key,
                 "value": value,
@@ -270,7 +274,17 @@ fn execute_config(
                 "dataChangeCreatedBy": operator,
                 "dataChangeLastModifiedBy": operator,
             });
-            openapi.request("PUT", &path, Some(body))
+            match openapi
+                .client
+                .request("PUT", &update_path, Some(body.clone()))
+            {
+                Ok(response) => Ok(render_openapi_response(&openapi.writer, &response)),
+                Err(error) if error.http_status_code() == Some(404) => {
+                    let response = openapi.client.request("POST", &create_path, Some(body))?;
+                    Ok(render_openapi_response(&openapi.writer, &response))
+                }
+                Err(error) => Err(error),
+            }
         }
         ConfigCommand::Delete {
             scope,
@@ -329,12 +343,8 @@ fn execute_release(
     match command {
         ReleaseCommand::List { scope, page, size } => {
             let mut path = format!("{}/releases/active", namespace_path(&scope));
-            if let Some(page) = page {
-                path = append_query(path, "page", &page.to_string());
-            }
-            if let Some(size) = size {
-                path = append_query(path, "size", &size.to_string());
-            }
+            path = append_query(path, "page", &page.unwrap_or(DEFAULT_PAGE).to_string());
+            path = append_query(path, "size", &size.unwrap_or(DEFAULT_PAGE_SIZE).to_string());
             openapi.request("GET", &path, None)
         }
         ReleaseCommand::Create {

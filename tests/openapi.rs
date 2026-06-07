@@ -109,6 +109,20 @@ fn namespace_config_and_release_commands_map_to_openapi_paths() {
         "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/application/items/timeout"
     );
 
+    let config_list_server = TestServer::json(r#"{"content":[],"page":0,"size":20,"total":0}"#);
+    write_config(&home, &profile_config(&config_list_server.url()));
+    base_command(&home)
+        .env("APOLLO_TOKEN", "consumer-token")
+        .args([
+            "--output", "json", "config", "list", "--env", "DEV", "--app", "demo",
+        ])
+        .assert()
+        .success();
+    assert_eq!(
+        config_list_server.request().path,
+        "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/application/items?page=0&size=20"
+    );
+
     let release_server = TestServer::json(r#"[{"id":1,"name":"release-1"}]"#);
     write_config(&home, &profile_config(&release_server.url()));
     base_command(&home)
@@ -120,7 +134,7 @@ fn namespace_config_and_release_commands_map_to_openapi_paths() {
         .success();
     assert_eq!(
         release_server.request().path,
-        "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/application/releases/active"
+        "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/application/releases/active?page=0&size=20"
     );
 }
 
@@ -170,6 +184,49 @@ fn config_set_with_yes_sends_update_payload() {
     assert_eq!(body["key"], "timeout");
     assert_eq!(body["value"], "3000");
     assert_eq!(body["dataChangeLastModifiedBy"], "apollo-bot");
+    assert_eq!(body["dataChangeCreatedBy"], "apollo-bot");
+}
+
+#[test]
+fn config_set_falls_back_to_create_when_update_reports_missing_item() {
+    let server = TestServer::sequence(vec![
+        (404, "application/json", r#"{"message":"item not found"}"#),
+        (
+            200,
+            "application/json",
+            r#"{"key":"timeout","value":"3000"}"#,
+        ),
+    ]);
+    let home = temp_home();
+    write_config(
+        &home,
+        &profile_config_with_operator(&server.url(), "apollo-bot"),
+    );
+
+    base_command(&home)
+        .env("APOLLO_TOKEN", "consumer-token")
+        .args([
+            "--yes", "--output", "json", "config", "set", "--env", "DEV", "--app", "demo",
+            "timeout", "3000",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""key": "timeout""#));
+
+    let requests = server.requests(2);
+    assert_eq!(requests[0].method, "PUT");
+    assert_eq!(
+        requests[0].path,
+        "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/application/items/timeout?createIfNotExists=true"
+    );
+    assert_eq!(requests[1].method, "POST");
+    assert_eq!(
+        requests[1].path,
+        "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/application/items?operator=apollo-bot"
+    );
+    let body: Value = serde_json::from_str(&requests[1].body).expect("json body");
+    assert_eq!(body["key"], "timeout");
+    assert_eq!(body["value"], "3000");
     assert_eq!(body["dataChangeCreatedBy"], "apollo-bot");
 }
 
@@ -272,13 +329,19 @@ impl TestServer {
     }
 
     fn new(status: u16, content_type: &'static str, body: &'static str) -> Self {
+        Self::sequence(vec![(status, content_type, body)])
+    }
+
+    fn sequence(responses: Vec<(u16, &'static str, &'static str)>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
         let addr = listener.local_addr().expect("local addr");
         let (request_tx, request_rx) = mpsc::channel();
         thread::spawn(move || {
-            let (stream, _) = listener.accept().expect("accept request");
-            let request = read_request(stream, status, content_type, body);
-            request_tx.send(request).expect("send captured request");
+            for (status, content_type, body) in responses {
+                let (stream, _) = listener.accept().expect("accept request");
+                let request = read_request(stream, status, content_type, body);
+                request_tx.send(request).expect("send captured request");
+            }
         });
         Self { addr, request_rx }
     }
@@ -289,6 +352,12 @@ impl TestServer {
 
     fn request(self) -> CapturedRequest {
         self.request_rx.recv().expect("captured request")
+    }
+
+    fn requests(self, count: usize) -> Vec<CapturedRequest> {
+        (0..count)
+            .map(|_| self.request_rx.recv().expect("captured request"))
+            .collect()
     }
 }
 

@@ -153,6 +153,13 @@ impl CliError {
         }
     }
 
+    pub fn http_status_code(&self) -> Option<u16> {
+        match self.kind {
+            CliErrorKind::HttpStatus { status, .. } => Some(status),
+            _ => None,
+        }
+    }
+
     pub fn render(&self) -> RenderedOutput {
         match &self.kind {
             CliErrorKind::Parse { message } => RenderedOutput {
