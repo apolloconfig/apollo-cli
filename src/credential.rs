@@ -1,6 +1,6 @@
 use std::env;
 use std::fs;
-use std::io::Read;
+use std::io::{BufRead, IsTerminal};
 use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
@@ -211,25 +211,46 @@ pub fn token_from_env_or_stdin(
     format: crate::cli::OutputFormat,
 ) -> Result<Sensitive, CliError> {
     if token_stdin {
-        let mut token = String::new();
-        let mut stdin = std::io::stdin();
-        stdin
-            .read_to_string(&mut token)
-            .map_err(|error| CliError::invalid_input(&error.to_string(), format))?;
-        let token = token.trim().to_owned();
-        if token.is_empty() {
-            return Err(CliError::invalid_input("token input was empty", format));
-        }
-        return Ok(Sensitive::new(token));
+        let stdin = std::io::stdin();
+        return token_from_reader(stdin.lock(), format);
     }
 
-    env::var("APOLLO_TOKEN")
-        .ok()
-        .filter(|token| !token.trim().is_empty())
-        .map(Sensitive::new)
-        .ok_or_else(|| {
-            CliError::invalid_input("provide a token with --token-stdin or APOLLO_TOKEN", format)
-        })
+    if let Some(token) = env_token() {
+        return Ok(token);
+    }
+
+    if std::io::stdin().is_terminal() && std::io::stderr().is_terminal() {
+        let token = rpassword::prompt_password("Consumer token: ")
+            .map_err(|error| CliError::invalid_input(&error.to_string(), format))?;
+        return token_from_value(token, format);
+    }
+
+    Err(CliError::invalid_input(
+        "provide a token with interactive prompt, --token-stdin, or APOLLO_TOKEN",
+        format,
+    ))
+}
+
+fn token_from_reader<R: BufRead>(
+    mut reader: R,
+    format: crate::cli::OutputFormat,
+) -> Result<Sensitive, CliError> {
+    let mut token = String::new();
+    reader
+        .read_line(&mut token)
+        .map_err(|error| CliError::invalid_input(&error.to_string(), format))?;
+    token_from_value(token, format)
+}
+
+fn token_from_value(
+    token: String,
+    format: crate::cli::OutputFormat,
+) -> Result<Sensitive, CliError> {
+    let token = token.trim().to_owned();
+    if token.is_empty() {
+        return Err(CliError::invalid_input("token input was empty", format));
+    }
+    Ok(Sensitive::new(token))
 }
 
 fn source_from_backend(backend: &str) -> CredentialSource {
@@ -274,8 +295,10 @@ fn native_disabled_for_tests() -> bool {
 mod tests {
     use std::cell::RefCell;
     use std::collections::BTreeMap;
+    use std::io::Cursor;
 
     use super::CredentialStore;
+    use crate::cli::OutputFormat;
     use crate::redaction::Sensitive;
 
     #[derive(Default)]
@@ -317,5 +340,24 @@ mod tests {
 
         store.delete("dev").expect("delete token");
         assert!(store.get("dev").expect("get after delete").is_none());
+    }
+
+    #[test]
+    fn token_from_reader_accepts_enter_terminated_token() {
+        let token = super::token_from_reader(
+            Cursor::new("secret-from-stdin\nignored-second-line\n"),
+            OutputFormat::Json,
+        )
+        .expect("token");
+
+        assert_eq!(token.expose_secret(), "secret-from-stdin");
+    }
+
+    #[test]
+    fn token_from_reader_rejects_empty_token() {
+        let error = super::token_from_reader(Cursor::new("\n"), OutputFormat::Json)
+            .expect_err("empty token should fail");
+
+        assert_eq!(error.exit_code(), 1);
     }
 }

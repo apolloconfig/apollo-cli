@@ -79,7 +79,7 @@ Use `apollo init` for first-time setup. It creates a profile, writes non-secret 
 For local Apollo assembly testing:
 
 ```bash
-printf '%s\n' "$TOKEN" | apollo --output json init --token-stdin --store-token-in-file
+apollo --output json init --store-token-in-file
 apollo profile show
 apollo env list
 ```
@@ -160,6 +160,7 @@ Runtime context resolution follows this order:
 
 ## Auth commands
 
+- `apollo auth login`
 - `apollo auth login --token-stdin`
 - `apollo auth login --token-stdin --store-token-in-file`
 - `apollo auth status`
@@ -195,11 +196,18 @@ APOLLO_TOKEN="$TOKEN" apollo --server http://localhost:8070 app list --output js
 that environment credentials will continue to apply; run `unset APOLLO_TOKEN` to disable that
 temporary credential.
 
-For interactive use, configure a profile and store the token:
+For interactive use, configure a profile and store the token with hidden input:
+
+```bash
+apollo --profile dev auth login
+apollo --profile dev app list
+```
+
+For scripts or manual paste-with-enter workflows, `--token-stdin` reads one token line:
 
 ```bash
 printf '%s\n' "$TOKEN" | apollo --profile dev auth login --token-stdin
-apollo --profile dev app list
+apollo --profile dev auth login --token-stdin
 ```
 
 ## Redaction and Errors
