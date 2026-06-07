@@ -1,0 +1,428 @@
+use std::fs;
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver};
+use std::thread;
+
+use assert_cmd::Command;
+use predicates::prelude::predicate;
+use serde_json::Value;
+use tempfile::TempDir;
+
+#[test]
+fn api_get_calls_openapi_with_consumer_token() {
+    let server = TestServer::json(r#"[{"appId":"demo"}]"#);
+    let home = temp_home();
+
+    let assert = base_command(&home)
+        .env("APOLLO_TOKEN", "consumer-token")
+        .args([
+            "--server",
+            &server.url(),
+            "--output",
+            "json",
+            "api",
+            "get",
+            "/openapi/v1/apps",
+        ])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let json: Value = serde_json::from_str(&stdout).expect("json stdout");
+    assert_eq!(json["data"][0]["appId"], "demo");
+    assert!(!stdout.contains("consumer-token"));
+
+    let request = server.request();
+    assert_eq!(request.method, "GET");
+    assert_eq!(request.path, "/openapi/v1/apps");
+    assert!(
+        request
+            .headers
+            .iter()
+            .any(|header| header.eq_ignore_ascii_case("authorization: consumer-token"))
+    );
+}
+
+#[test]
+fn app_and_env_commands_call_openapi_endpoints() {
+    let app_server = TestServer::json(r#"[{"appId":"demo"}]"#);
+    let home = temp_home();
+    write_config(&home, &profile_config(&app_server.url()));
+
+    base_command(&home)
+        .env("APOLLO_TOKEN", "consumer-token")
+        .args(["--output", "json", "app", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""appId": "demo""#));
+    assert_eq!(app_server.request().path, "/openapi/v1/apps");
+
+    let env_server = TestServer::json(r#"["DEV","FAT"]"#);
+    write_config(&home, &profile_config(&env_server.url()));
+    base_command(&home)
+        .env("APOLLO_TOKEN", "consumer-token")
+        .args(["--output", "json", "env", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("DEV"));
+    assert_eq!(env_server.request().path, "/openapi/v1/envs");
+}
+
+#[test]
+fn namespace_config_and_release_commands_map_to_openapi_paths() {
+    let namespace_server = TestServer::json(r#"[{"namespaceName":"application"}]"#);
+    let home = temp_home();
+    write_config(&home, &profile_config(&namespace_server.url()));
+
+    base_command(&home)
+        .env("APOLLO_TOKEN", "consumer-token")
+        .args([
+            "--output",
+            "json",
+            "namespace",
+            "list",
+            "--env",
+            "DEV",
+            "--app",
+            "demo",
+        ])
+        .assert()
+        .success();
+    assert_eq!(
+        namespace_server.request().path,
+        "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces"
+    );
+
+    let config_server = TestServer::json(r#"{"key":"timeout","value":"3000"}"#);
+    write_config(&home, &profile_config(&config_server.url()));
+    base_command(&home)
+        .env("APOLLO_TOKEN", "consumer-token")
+        .args([
+            "--output", "json", "config", "get", "--env", "DEV", "--app", "demo", "timeout",
+        ])
+        .assert()
+        .success();
+    assert_eq!(
+        config_server.request().path,
+        "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/application/items/timeout"
+    );
+
+    let release_server = TestServer::json(r#"[{"id":1,"name":"release-1"}]"#);
+    write_config(&home, &profile_config(&release_server.url()));
+    base_command(&home)
+        .env("APOLLO_TOKEN", "consumer-token")
+        .args([
+            "--output", "json", "release", "list", "--env", "DEV", "--app", "demo",
+        ])
+        .assert()
+        .success();
+    assert_eq!(
+        release_server.request().path,
+        "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/application/releases/active"
+    );
+}
+
+#[test]
+fn mutating_commands_require_yes_before_network_call() {
+    let home = temp_home();
+    write_config(&home, &profile_config("http://127.0.0.1:9"));
+
+    let assert = base_command(&home)
+        .env("APOLLO_TOKEN", "consumer-token")
+        .args([
+            "--output", "json", "config", "set", "--env", "DEV", "--app", "demo", "timeout", "3000",
+        ])
+        .assert()
+        .failure();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let json: Value = serde_json::from_str(&stdout).expect("json stdout");
+    assert_eq!(json["error"]["code"], "confirmation_required");
+}
+
+#[test]
+fn config_set_with_yes_sends_update_payload() {
+    let server = TestServer::empty();
+    let home = temp_home();
+    write_config(
+        &home,
+        &profile_config_with_operator(&server.url(), "apollo-bot"),
+    );
+
+    base_command(&home)
+        .env("APOLLO_TOKEN", "consumer-token")
+        .args([
+            "--yes", "--output", "json", "config", "set", "--env", "DEV", "--app", "demo",
+            "timeout", "3000",
+        ])
+        .assert()
+        .success();
+
+    let request = server.request();
+    assert_eq!(request.method, "PUT");
+    assert_eq!(
+        request.path,
+        "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/application/items/timeout?createIfNotExists=true"
+    );
+    let body: Value = serde_json::from_str(&request.body).expect("json body");
+    assert_eq!(body["key"], "timeout");
+    assert_eq!(body["value"], "3000");
+    assert_eq!(body["dataChangeLastModifiedBy"], "apollo-bot");
+    assert_eq!(body["dataChangeCreatedBy"], "apollo-bot");
+}
+
+#[test]
+fn namespace_create_with_yes_sends_namespace_instance_payload() {
+    let server = TestServer::empty();
+    let home = temp_home();
+    write_config(
+        &home,
+        &profile_config_with_operator(&server.url(), "apollo-bot"),
+    );
+
+    base_command(&home)
+        .env("APOLLO_TOKEN", "consumer-token")
+        .args([
+            "--yes",
+            "--output",
+            "json",
+            "namespace",
+            "create",
+            "--env",
+            "DEV",
+            "--app",
+            "demo",
+            "application",
+        ])
+        .assert()
+        .success();
+
+    let request = server.request();
+    assert_eq!(request.method, "POST");
+    assert_eq!(request.path, "/openapi/v1/namespaces?operator=apollo-bot");
+    let body: Value = serde_json::from_str(&request.body).expect("json body");
+    assert_eq!(body[0]["appId"], "demo");
+    assert_eq!(body[0]["env"], "DEV");
+    assert_eq!(body[0]["clusterName"], "default");
+    assert_eq!(body[0]["appNamespaceName"], "application");
+}
+
+#[test]
+fn config_apply_with_yes_uses_synchronize_endpoint() {
+    let server = TestServer::empty();
+    let home = temp_home();
+    write_config(
+        &home,
+        &profile_config_with_operator(&server.url(), "apollo-bot"),
+    );
+
+    base_command(&home)
+        .env("APOLLO_TOKEN", "consumer-token")
+        .args([
+            "--yes",
+            "--output",
+            "json",
+            "config",
+            "apply",
+            "--env",
+            "DEV",
+            "--app",
+            "demo",
+            "--target-env",
+            "FAT",
+        ])
+        .assert()
+        .success();
+
+    let request = server.request();
+    assert_eq!(request.method, "POST");
+    assert_eq!(
+        request.path,
+        "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/application/items/synchronize?operator=apollo-bot"
+    );
+    let body: Value = serde_json::from_str(&request.body).expect("json body");
+    assert_eq!(body["syncToNamespaces"][0]["appId"], "demo");
+    assert_eq!(body["syncToNamespaces"][0]["env"], "FAT");
+    assert_eq!(body["syncToNamespaces"][0]["clusterName"], "default");
+    assert_eq!(body["syncToNamespaces"][0]["namespaceName"], "application");
+}
+
+#[derive(Debug)]
+struct CapturedRequest {
+    method: String,
+    path: String,
+    headers: Vec<String>,
+    body: String,
+}
+
+struct TestServer {
+    addr: SocketAddr,
+    request_rx: Receiver<CapturedRequest>,
+}
+
+impl TestServer {
+    fn json(body: &'static str) -> Self {
+        Self::new(200, "application/json", body)
+    }
+
+    fn empty() -> Self {
+        Self::new(200, "application/json", "{}")
+    }
+
+    fn new(status: u16, content_type: &'static str, body: &'static str) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let (request_tx, request_rx) = mpsc::channel();
+        thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept request");
+            let request = read_request(stream, status, content_type, body);
+            request_tx.send(request).expect("send captured request");
+        });
+        Self { addr, request_rx }
+    }
+
+    fn url(&self) -> String {
+        format!("http://{}", self.addr)
+    }
+
+    fn request(self) -> CapturedRequest {
+        self.request_rx.recv().expect("captured request")
+    }
+}
+
+fn read_request(
+    mut stream: TcpStream,
+    status: u16,
+    content_type: &str,
+    response_body: &str,
+) -> CapturedRequest {
+    let mut buffer = Vec::new();
+    let mut chunk = [0_u8; 1024];
+    loop {
+        let read = stream.read(&mut chunk).expect("read request");
+        if read == 0 {
+            break;
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+        if request_complete(&buffer) {
+            break;
+        }
+    }
+
+    let request = String::from_utf8_lossy(&buffer).to_string();
+    let (head, body) = request.split_once("\r\n\r\n").unwrap_or((&request, ""));
+    let mut lines = head.lines();
+    let request_line = lines.next().expect("request line");
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().expect("method").to_owned();
+    let path = parts.next().expect("path").to_owned();
+    let headers = lines.map(ToOwned::to_owned).collect();
+
+    let response = format!(
+        "HTTP/1.1 {} OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        status,
+        content_type,
+        response_body.len(),
+        response_body
+    );
+    stream
+        .write_all(response.as_bytes())
+        .expect("write response");
+
+    CapturedRequest {
+        method,
+        path,
+        headers,
+        body: body.to_owned(),
+    }
+}
+
+fn request_complete(buffer: &[u8]) -> bool {
+    let request = String::from_utf8_lossy(buffer);
+    let Some((head, body)) = request.split_once("\r\n\r\n") else {
+        return false;
+    };
+    let content_length = head.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case("content-length")
+            .then(|| value.trim().parse::<usize>().ok())
+            .flatten()
+    });
+    match content_length {
+        Some(length) => body.len() >= length,
+        None => true,
+    }
+}
+
+fn base_command(home: &TempDir) -> Command {
+    let mut command = Command::cargo_bin("apollo").expect("apollo binary");
+    command.env_remove("APOLLO_PROFILE");
+    command.env_remove("APOLLO_SERVER");
+    command.env_remove("APOLLO_OUTPUT");
+    command.env_remove("APOLLO_TOKEN");
+    command.env_remove("XDG_CONFIG_HOME");
+    command.env_remove("APPDATA");
+    command.env("APOLLO_CLI_TEST_DISABLE_NATIVE", "1");
+    command.env("HOME", home.path());
+    if cfg!(target_os = "linux") {
+        command.env("XDG_CONFIG_HOME", home.path().join(".config"));
+    }
+    if cfg!(target_os = "windows") {
+        command.env("APPDATA", home.path().join("AppData").join("Roaming"));
+    }
+    command
+}
+
+fn temp_home() -> TempDir {
+    tempfile::tempdir().expect("temp home")
+}
+
+fn config_path(home: &TempDir) -> PathBuf {
+    config_root(home).join("apollo").join("config.toml")
+}
+
+fn config_root(home: &TempDir) -> PathBuf {
+    if cfg!(target_os = "macos") {
+        home.path().join("Library").join("Application Support")
+    } else if cfg!(target_os = "windows") {
+        home.path().join("AppData").join("Roaming")
+    } else {
+        home.path().join(".config")
+    }
+}
+
+fn write_config(home: &TempDir, body: &str) {
+    let config_path = config_path(home);
+    fs::create_dir_all(config_path.parent().expect("config parent")).expect("create config dir");
+    fs::write(config_path, normalize_toml(body)).expect("write config");
+}
+
+fn profile_config(server: &str) -> String {
+    profile_config_with_operator(server, "apollo-bot")
+}
+
+fn profile_config_with_operator(server: &str, operator: &str) -> String {
+    format!(
+        r#"
+active_profile = "dev"
+
+[profiles.dev]
+server = "{}"
+output = "table"
+operator = "{}"
+"#,
+        server, operator
+    )
+}
+
+fn normalize_toml(body: &str) -> String {
+    body.lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_owned()
+        + "\n"
+}

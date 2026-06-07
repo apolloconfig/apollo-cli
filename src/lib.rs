@@ -3,6 +3,7 @@ mod command;
 mod config;
 mod credential;
 mod error;
+mod http;
 mod output;
 pub mod redaction;
 

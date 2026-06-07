@@ -6,19 +6,24 @@ This repository currently covers the first Apollo CLI v0 slices:
 
 - top-level v0 command routing
 - global flag parsing
-- structured placeholder errors
 - output formatting foundation
 - non-secret profile configuration
 - runtime context resolution
 - credential-store abstraction and auth commands
 - conservative redaction foundation
+- representative Apollo Portal OpenAPI calls under `/openapi/v1/*`
+- raw OpenAPI passthrough through `apollo api`
+- confirmation protection for mutating commands
 - local developer workflow and CI entrypoints
 
-It does not yet implement Apollo OpenAPI calls or agent-oriented flows.
+The package is intentionally self-contained and movable. It lives in this standalone repository for
+review, but avoids repo-specific assumptions so the crate can be split, vendored, or republished
+without Apollo server-side changes.
+
+It does not implement generated OpenAPI SDK bindings, agent sessions, MCP, or server-side schema
+changes in this slice.
 
 ## Command groups
-
-The current scaffold exposes the planned v0 top-level groups:
 
 - `auth`
 - `profile`
@@ -28,6 +33,31 @@ The current scaffold exposes the planned v0 top-level groups:
 - `config`
 - `release`
 - `api`
+
+Representative v0 commands:
+
+```bash
+apollo app list
+apollo app get sample-app
+apollo env list
+apollo namespace list --env DEV --app sample-app
+apollo namespace get --env DEV --app sample-app --namespace application
+apollo namespace create --env DEV --app sample-app application --yes
+apollo config list --env DEV --app sample-app
+apollo config get --env DEV --app sample-app timeout
+apollo config set --env DEV --app sample-app timeout 3000 --yes
+apollo config delete --env DEV --app sample-app timeout --yes
+apollo config diff --env DEV --app sample-app --target-env FAT
+apollo config apply --env DEV --app sample-app --target-env FAT --yes
+apollo release list --env DEV --app sample-app
+apollo release create --env DEV --app sample-app --title "release title" --yes
+apollo release rollback --env DEV 123 --yes
+apollo api get /openapi/v1/apps
+apollo api post /openapi/v1/apps --body '{"app":{"appId":"sample-app"}}' --yes
+```
+
+These commands use existing Apollo Portal OpenAPI endpoints only. Deprecated Portal WebAPI
+endpoints are intentionally not used.
 
 ## Global flags
 
@@ -108,6 +138,22 @@ Native backend selection follows the OS behavior of the underlying credential st
 
 File fallback writes token material outside `config.toml` under the CLI credentials directory and uses restrictive file permissions on Unix. The profile config stores only non-secret credential lookup metadata.
 
+OpenAPI commands authenticate with the existing Apollo Consumer token model. The CLI sends the
+token as the `Authorization` header value expected by Apollo Portal OpenAPI.
+
+For local or CI use, `APOLLO_TOKEN` takes precedence and is never written to disk:
+
+```bash
+APOLLO_TOKEN="$TOKEN" apollo --server http://localhost:8070 app list --output json
+```
+
+For interactive use, configure a profile and store the token:
+
+```bash
+printf '%s\n' "$TOKEN" | apollo --profile dev auth login --token-stdin
+apollo --profile dev app list
+```
+
 ## Redaction and Errors
 
 The output layer applies conservative redaction to human and JSON output before rendering. Token-like fields, `Authorization: Bearer ...` headers, and `consumer token ...` text are rendered as `[REDACTED]`.
@@ -132,6 +178,28 @@ Current error categories:
 - `confirmation_required`
 - `unsupported_operation`
 
+## OpenAPI behavior
+
+The first v0 implementation uses a small generic HTTP client instead of a generated SDK. This keeps
+the CLI independent from the Apollo server repository while still constraining all built-in resource
+commands to `/openapi/v1/*`.
+
+Path and payload mapping follows the current Apollo Portal OpenAPI contract, including:
+
+- `GET /openapi/v1/apps`
+- `GET /openapi/v1/envs`
+- `GET /openapi/v1/envs/{env}/apps/{appId}/clusters/{clusterName}/namespaces`
+- `GET|PUT|DELETE /openapi/v1/envs/{env}/apps/{appId}/clusters/{clusterName}/namespaces/{namespaceName}/items/{key}`
+- `POST /openapi/v1/envs/{env}/apps/{appId}/clusters/{clusterName}/namespaces/{namespaceName}/items/diff`
+- `POST /openapi/v1/namespaces`
+- `POST /openapi/v1/envs/{env}/apps/{appId}/clusters/{clusterName}/namespaces/{namespaceName}/items/synchronize`
+- `GET /openapi/v1/envs/{env}/apps/{appId}/clusters/{clusterName}/namespaces/{namespaceName}/releases/active`
+- `POST /openapi/v1/envs/{env}/apps/{appId}/clusters/{clusterName}/namespaces/{namespaceName}/releases`
+- `PUT /openapi/v1/envs/{env}/releases/{releaseId}/rollback`
+
+Mutating commands require `--yes`. Without it, the CLI returns `confirmation_required` before
+opening a network connection.
+
 ## Local development
 
 Build the CLI:
@@ -150,6 +218,19 @@ Run tests:
 
 ```bash
 cargo test
+```
+
+Run focused OpenAPI command integration tests with the local mock HTTP server:
+
+```bash
+cargo test --test openapi
+```
+
+If you have a local Apollo Portal running, you can also smoke-test against it:
+
+```bash
+APOLLO_TOKEN="$TOKEN" cargo run -- --server http://localhost:8070 --output json env list
+APOLLO_TOKEN="$TOKEN" cargo run -- --server http://localhost:8070 --output json app list
 ```
 
 Format the repository:
@@ -171,9 +252,11 @@ cargo clippy --all-targets --all-features -- -D warnings
 - `src/command.rs`: top-level command routing
 - `src/credential.rs`: credential-store abstraction and providers
 - `src/error.rs`: structured CLI error model
+- `src/http.rs`: generic OpenAPI HTTP client and path helpers
 - `src/output.rs`: output rendering abstractions
 - `src/redaction.rs`: conservative redaction utilities
 - `tests/auth.rs`: integration coverage for auth commands and credential behavior
-- `tests/cli.rs`: integration coverage for help, flags, and placeholder errors
+- `tests/cli.rs`: integration coverage for help, flags, and structured errors
+- `tests/openapi.rs`: integration coverage for OpenAPI paths, auth headers, and confirmation guards
 - `tests/profile.rs`: integration coverage for profile commands and context resolution
 - `tests/redaction.rs`: integration coverage for redaction behavior

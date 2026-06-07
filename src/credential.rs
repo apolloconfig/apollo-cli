@@ -139,10 +139,7 @@ pub fn status(
     profile: &str,
     credential: Option<&CredentialRef>,
 ) -> CredentialStatus {
-    if env::var("APOLLO_TOKEN")
-        .map(|token| !token.trim().is_empty())
-        .unwrap_or(false)
-    {
+    if env_token().is_some() {
         return CredentialStatus {
             authenticated: true,
             source: CredentialSource::Env,
@@ -151,16 +148,8 @@ pub fn status(
         };
     }
 
-    let credential = credential.cloned().unwrap_or_else(|| CredentialRef {
-        backend: "native".to_owned(),
-        key: profile.to_owned(),
-    });
-
-    let store_result = match credential.backend.as_str() {
-        "file" => FileCredentialStore::new(config_path).get(&credential.key),
-        "native" => NativeCredentialStore.get(&credential.key),
-        _ => Ok(None),
-    };
+    let credential = credential_for_profile(profile, credential);
+    let store_result = token_from_store(config_path, &credential);
 
     CredentialStatus {
         authenticated: store_result.ok().flatten().is_some(),
@@ -168,6 +157,22 @@ pub fn status(
         backend: Some(credential.backend),
         key: Some(credential.key),
     }
+}
+
+pub fn resolve_token(
+    config_path: &Path,
+    profile: Option<&str>,
+    credential: Option<&CredentialRef>,
+) -> Result<Option<Sensitive>, String> {
+    if let Some(token) = env_token() {
+        return Ok(Some(token));
+    }
+
+    let Some(profile) = profile else {
+        return Ok(None);
+    };
+    let credential = credential_for_profile(profile, credential);
+    token_from_store(config_path, &credential)
 }
 
 pub fn store_file(
@@ -233,6 +238,32 @@ fn source_from_backend(backend: &str) -> CredentialSource {
         "native" => CredentialSource::Native,
         _ => CredentialSource::None,
     }
+}
+
+fn credential_for_profile(profile: &str, credential: Option<&CredentialRef>) -> CredentialRef {
+    credential.cloned().unwrap_or_else(|| CredentialRef {
+        backend: "native".to_owned(),
+        key: profile.to_owned(),
+    })
+}
+
+fn token_from_store(
+    config_path: &Path,
+    credential: &CredentialRef,
+) -> Result<Option<Sensitive>, String> {
+    match credential.backend.as_str() {
+        "file" => FileCredentialStore::new(config_path).get(&credential.key),
+        "native" => NativeCredentialStore.get(&credential.key),
+        _ => Ok(None),
+    }
+}
+
+fn env_token() -> Option<Sensitive> {
+    env::var("APOLLO_TOKEN")
+        .ok()
+        .map(|token| token.trim().to_owned())
+        .filter(|token| !token.is_empty())
+        .map(Sensitive::new)
 }
 
 fn native_disabled_for_tests() -> bool {

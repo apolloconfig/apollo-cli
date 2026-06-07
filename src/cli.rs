@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
     name = "apollo",
     bin_name = "apollo",
     version,
-    about = "Apollo CLI v0 scaffold",
-    long_about = "Standalone Apollo CLI scaffold for v0 command routing, global flags, and structured output/error handling."
+    about = "Standalone Apollo OpenAPI CLI",
+    long_about = "Standalone Apollo CLI for profile/auth management and Apollo Portal OpenAPI v0 workflows."
 )]
 pub struct Cli {
     #[command(flatten)]
@@ -45,12 +45,27 @@ pub enum Commands {
         #[command(subcommand)]
         command: ProfileCommand,
     },
-    App,
-    Env,
-    Namespace,
-    Config,
-    Release,
-    Api,
+    App {
+        #[command(subcommand)]
+        command: AppCommand,
+    },
+    Env {
+        #[command(subcommand)]
+        command: EnvCommand,
+    },
+    Namespace {
+        #[command(subcommand)]
+        command: NamespaceCommand,
+    },
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
+    Release {
+        #[command(subcommand)]
+        command: ReleaseCommand,
+    },
+    Api(ApiArgs),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
@@ -70,4 +85,175 @@ pub enum AuthCommand {
     },
     Status,
     Logout,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum AppCommand {
+    List {
+        #[arg(long)]
+        app_ids: Option<String>,
+    },
+    Get {
+        app_id: String,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum EnvCommand {
+    List,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum NamespaceCommand {
+    List {
+        #[command(flatten)]
+        scope: ClusterScopeArgs,
+    },
+    Get {
+        #[command(flatten)]
+        scope: NamespaceScopeArgs,
+    },
+    Create {
+        #[command(flatten)]
+        scope: ClusterScopeArgs,
+        name: String,
+        #[arg(long)]
+        operator: Option<String>,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum ConfigCommand {
+    List {
+        #[command(flatten)]
+        scope: NamespaceScopeArgs,
+        #[arg(long)]
+        page: Option<u32>,
+        #[arg(long)]
+        size: Option<u32>,
+    },
+    Get {
+        #[command(flatten)]
+        scope: NamespaceScopeArgs,
+        key: String,
+    },
+    Set {
+        #[command(flatten)]
+        scope: NamespaceScopeArgs,
+        key: String,
+        value: String,
+        #[arg(long)]
+        comment: Option<String>,
+        #[arg(long)]
+        operator: Option<String>,
+    },
+    Delete {
+        #[command(flatten)]
+        scope: NamespaceScopeArgs,
+        key: String,
+        #[arg(long)]
+        operator: Option<String>,
+    },
+    Diff {
+        #[command(flatten)]
+        scope: NamespaceScopeArgs,
+        #[arg(long)]
+        target_env: String,
+        #[arg(long, default_value = "default")]
+        target_cluster: String,
+        #[arg(long)]
+        target_namespace: Option<String>,
+    },
+    Apply {
+        #[command(flatten)]
+        scope: NamespaceScopeArgs,
+        #[arg(long)]
+        target_env: String,
+        #[arg(long, default_value = "default")]
+        target_cluster: String,
+        #[arg(long)]
+        target_namespace: Option<String>,
+        #[arg(long)]
+        operator: Option<String>,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum ReleaseCommand {
+    List {
+        #[command(flatten)]
+        scope: NamespaceScopeArgs,
+        #[arg(long)]
+        page: Option<u32>,
+        #[arg(long)]
+        size: Option<u32>,
+    },
+    Create {
+        #[command(flatten)]
+        scope: NamespaceScopeArgs,
+        #[arg(long)]
+        title: String,
+        #[arg(long)]
+        comment: Option<String>,
+        #[arg(long)]
+        emergency: bool,
+        #[arg(long)]
+        operator: Option<String>,
+    },
+    Rollback {
+        #[arg(long)]
+        env: String,
+        release_id: i64,
+        #[arg(long)]
+        to_release_id: Option<i64>,
+        #[arg(long)]
+        operator: Option<String>,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Args)]
+pub struct ApiArgs {
+    pub method: HttpMethod,
+    pub path: String,
+    #[arg(long)]
+    pub body: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Args)]
+pub struct ClusterScopeArgs {
+    #[arg(long)]
+    pub env: String,
+    #[arg(long)]
+    pub app: String,
+    #[arg(long, default_value = "default")]
+    pub cluster: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Args)]
+pub struct NamespaceScopeArgs {
+    #[command(flatten)]
+    pub cluster_scope: ClusterScopeArgs,
+    #[arg(long, default_value = "application")]
+    pub namespace: String,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+pub enum HttpMethod {
+    Get,
+    Post,
+    Put,
+    Patch,
+    Delete,
+}
+
+impl HttpMethod {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Get => "GET",
+            Self::Post => "POST",
+            Self::Put => "PUT",
+            Self::Patch => "PATCH",
+            Self::Delete => "DELETE",
+        }
+    }
 }

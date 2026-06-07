@@ -22,9 +22,17 @@ pub enum CliErrorKind {
     InvalidInput {
         message: String,
     },
-    NotImplemented {
-        command: String,
-        follow_up_issue: Option<u32>,
+    AuthenticationRequired {
+        message: String,
+    },
+    Network {
+        path: String,
+        message: String,
+    },
+    HttpStatus {
+        status: u16,
+        path: String,
+        message: String,
     },
     ProfileNotFound {
         profile: String,
@@ -42,20 +50,6 @@ impl CliError {
         Self {
             kind: CliErrorKind::Parse { message },
             format: OutputFormat::Table,
-        }
-    }
-
-    pub fn not_implemented(
-        command: &str,
-        follow_up_issue: Option<u32>,
-        format: OutputFormat,
-    ) -> Self {
-        Self {
-            kind: CliErrorKind::NotImplemented {
-                command: command.to_owned(),
-                follow_up_issue,
-            },
-            format,
         }
     }
 
@@ -114,6 +108,36 @@ impl CliError {
         }
     }
 
+    pub fn authentication_required(message: &str, format: OutputFormat) -> Self {
+        Self {
+            kind: CliErrorKind::AuthenticationRequired {
+                message: message.to_owned(),
+            },
+            format,
+        }
+    }
+
+    pub fn network(path: &str, message: &str, format: OutputFormat) -> Self {
+        Self {
+            kind: CliErrorKind::Network {
+                path: path.to_owned(),
+                message: message.to_owned(),
+            },
+            format,
+        }
+    }
+
+    pub fn http_status(status: u16, path: &str, message: &str, format: OutputFormat) -> Self {
+        Self {
+            kind: CliErrorKind::HttpStatus {
+                status,
+                path: path.to_owned(),
+                message: message.to_owned(),
+            },
+            format,
+        }
+    }
+
     pub fn exit_code(&self) -> u8 {
         match self.kind {
             CliErrorKind::Parse { .. } => 2,
@@ -122,7 +146,9 @@ impl CliError {
             | CliErrorKind::ConfirmationRequired { .. }
             | CliErrorKind::CredentialStoreUnavailable { .. }
             | CliErrorKind::InvalidInput { .. }
-            | CliErrorKind::NotImplemented { .. }
+            | CliErrorKind::AuthenticationRequired { .. }
+            | CliErrorKind::Network { .. }
+            | CliErrorKind::HttpStatus { .. }
             | CliErrorKind::ProfileNotFound { .. } => 1,
         }
     }
@@ -133,21 +159,6 @@ impl CliError {
                 stream: OutputStream::Stderr,
                 body: ensure_trailing_newline(message.clone()),
             },
-            CliErrorKind::NotImplemented {
-                command,
-                follow_up_issue,
-            } => OutputWriter::new(self.format).render_error(&StructuredError {
-                code: "not_implemented",
-                category: "unsupported_operation",
-                message: format!(
-                    "The '{}' command group is scaffolded but not implemented yet.",
-                    command
-                ),
-                command: Some(command.clone()),
-                follow_up_issue: *follow_up_issue,
-                path: None,
-                profile: None,
-            }),
             CliErrorKind::InvalidConfig { path, message } => OutputWriter::new(self.format)
                 .render_error(&StructuredError {
                     code: "invalid_config",
@@ -199,6 +210,46 @@ impl CliError {
                     profile: None,
                 })
             }
+            CliErrorKind::AuthenticationRequired { message } => OutputWriter::new(self.format)
+                .render_error(&StructuredError {
+                    code: "authentication_failed",
+                    category: "authentication_failed",
+                    message: message.clone(),
+                    command: Some("auth".to_owned()),
+                    follow_up_issue: Some(5630),
+                    path: None,
+                    profile: None,
+                }),
+            CliErrorKind::Network { path, message } => {
+                OutputWriter::new(self.format).render_error(&StructuredError {
+                    code: "network_error",
+                    category: "network",
+                    message: format!("OpenAPI request to {} failed: {}", path, message),
+                    command: None,
+                    follow_up_issue: None,
+                    path: Some(path.clone()),
+                    profile: None,
+                })
+            }
+            CliErrorKind::HttpStatus {
+                status,
+                path,
+                message,
+            } => {
+                let (code, category) = http_status_code_and_category(*status);
+                OutputWriter::new(self.format).render_error(&StructuredError {
+                    code,
+                    category,
+                    message: format!(
+                        "OpenAPI request to {} returned HTTP {}: {}",
+                        path, status, message
+                    ),
+                    command: None,
+                    follow_up_issue: None,
+                    path: Some(path.clone()),
+                    profile: None,
+                })
+            }
             CliErrorKind::ProfileNotFound { profile } => OutputWriter::new(self.format)
                 .render_error(&StructuredError {
                     code: "profile_not_found",
@@ -210,6 +261,18 @@ impl CliError {
                     profile: Some(profile.clone()),
                 }),
         }
+    }
+}
+
+fn http_status_code_and_category(status: u16) -> (&'static str, &'static str) {
+    match status {
+        401 => ("authentication_failed", "authentication_failed"),
+        403 => ("permission_denied", "permission_denied"),
+        404 => ("not_found", "not_found"),
+        409 => ("conflict", "conflict"),
+        412 => ("precondition_failed", "precondition_failed"),
+        400..=499 => ("invalid_input", "invalid_input"),
+        _ => ("server_error", "server"),
     }
 }
 

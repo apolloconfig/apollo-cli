@@ -24,19 +24,27 @@ fn help_lists_v0_command_groups_and_global_flags() {
 }
 
 #[test]
-fn placeholder_command_returns_structured_json_error() {
+fn openapi_command_without_token_returns_structured_json_error() {
     let assert = Command::cargo_bin("apollo")
         .expect("apollo binary")
-        .args(["--output", "json", "app"])
+        .env_remove("APOLLO_TOKEN")
+        .args([
+            "--server",
+            "http://127.0.0.1:9",
+            "--output",
+            "json",
+            "app",
+            "list",
+        ])
         .assert()
         .failure();
 
     let output = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 output");
     let json: Value = serde_json::from_str(&output).expect("valid json output");
 
-    assert_eq!(json["error"]["code"], "not_implemented");
-    assert_eq!(json["error"]["category"], "unsupported_operation");
-    assert_eq!(json["error"]["command"], "app");
+    assert_eq!(json["error"]["code"], "authentication_failed");
+    assert_eq!(json["error"]["category"], "authentication_failed");
+    assert_eq!(json["error"]["command"], "auth");
 }
 
 #[test]
