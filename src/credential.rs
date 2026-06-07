@@ -1,0 +1,290 @@
+use std::env;
+use std::fs;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
+use keyring::Entry;
+
+use crate::config::CredentialRef;
+use crate::error::CliError;
+use crate::redaction::Sensitive;
+
+const SERVICE_NAME: &str = "apollo-cli";
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CredentialSource {
+    Env,
+    File,
+    Native,
+    None,
+}
+
+impl CredentialSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Env => "env",
+            Self::File => "file",
+            Self::Native => "native",
+            Self::None => "none",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct CredentialStatus {
+    pub authenticated: bool,
+    pub source: CredentialSource,
+    pub backend: Option<String>,
+    pub key: Option<String>,
+}
+
+pub trait CredentialStore {
+    fn get(&self, key: &str) -> Result<Option<Sensitive>, String>;
+    fn set(&self, key: &str, token: &Sensitive) -> Result<(), String>;
+    fn delete(&self, key: &str) -> Result<(), String>;
+}
+
+pub struct NativeCredentialStore;
+
+impl CredentialStore for NativeCredentialStore {
+    fn get(&self, key: &str) -> Result<Option<Sensitive>, String> {
+        if native_disabled_for_tests() {
+            return Err("native credential store disabled".to_owned());
+        }
+        let entry = Entry::new(SERVICE_NAME, key).map_err(|error| error.to_string())?;
+        match entry.get_password() {
+            Ok(token) => Ok(Some(Sensitive::new(token))),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    fn set(&self, key: &str, token: &Sensitive) -> Result<(), String> {
+        if native_disabled_for_tests() {
+            return Err("native credential store disabled".to_owned());
+        }
+        let entry = Entry::new(SERVICE_NAME, key).map_err(|error| error.to_string())?;
+        entry
+            .set_password(token.expose_secret())
+            .map_err(|error| error.to_string())
+    }
+
+    fn delete(&self, key: &str) -> Result<(), String> {
+        if native_disabled_for_tests() {
+            return Err("native credential store disabled".to_owned());
+        }
+        let entry = Entry::new(SERVICE_NAME, key).map_err(|error| error.to_string())?;
+        match entry.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+}
+
+pub struct FileCredentialStore {
+    base_dir: PathBuf,
+}
+
+impl FileCredentialStore {
+    pub fn new(config_path: &Path) -> Self {
+        Self {
+            base_dir: config_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("credentials"),
+        }
+    }
+
+    pub fn path_for_key(&self, key: &str) -> PathBuf {
+        self.base_dir.join(format!("{}.token", key))
+    }
+}
+
+impl CredentialStore for FileCredentialStore {
+    fn get(&self, key: &str) -> Result<Option<Sensitive>, String> {
+        let path = self.path_for_key(key);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let token = fs::read_to_string(path).map_err(|error| error.to_string())?;
+        Ok(Some(Sensitive::new(token.trim().to_owned())))
+    }
+
+    fn set(&self, key: &str, token: &Sensitive) -> Result<(), String> {
+        fs::create_dir_all(&self.base_dir).map_err(|error| error.to_string())?;
+        let path = self.path_for_key(key);
+        fs::write(&path, token.expose_secret()).map_err(|error| error.to_string())?;
+        #[cfg(unix)]
+        {
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
+    fn delete(&self, key: &str) -> Result<(), String> {
+        let path = self.path_for_key(key);
+        if path.exists() {
+            fs::remove_file(path).map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+}
+
+pub fn status(
+    config_path: &Path,
+    profile: &str,
+    credential: Option<&CredentialRef>,
+) -> CredentialStatus {
+    if env::var("APOLLO_TOKEN")
+        .map(|token| !token.trim().is_empty())
+        .unwrap_or(false)
+    {
+        return CredentialStatus {
+            authenticated: true,
+            source: CredentialSource::Env,
+            backend: Some("env".to_owned()),
+            key: Some("APOLLO_TOKEN".to_owned()),
+        };
+    }
+
+    let credential = credential.cloned().unwrap_or_else(|| CredentialRef {
+        backend: "native".to_owned(),
+        key: profile.to_owned(),
+    });
+
+    let store_result = match credential.backend.as_str() {
+        "file" => FileCredentialStore::new(config_path).get(&credential.key),
+        "native" => NativeCredentialStore.get(&credential.key),
+        _ => Ok(None),
+    };
+
+    CredentialStatus {
+        authenticated: store_result.ok().flatten().is_some(),
+        source: source_from_backend(&credential.backend),
+        backend: Some(credential.backend),
+        key: Some(credential.key),
+    }
+}
+
+pub fn store_file(
+    config_path: &Path,
+    key: &str,
+    token: &Sensitive,
+) -> Result<CredentialRef, String> {
+    FileCredentialStore::new(config_path).set(key, token)?;
+    Ok(CredentialRef {
+        backend: "file".to_owned(),
+        key: key.to_owned(),
+    })
+}
+
+pub fn store_native(key: &str, token: &Sensitive) -> Result<CredentialRef, String> {
+    NativeCredentialStore.set(key, token)?;
+    Ok(CredentialRef {
+        backend: "native".to_owned(),
+        key: key.to_owned(),
+    })
+}
+
+pub fn delete(config_path: &Path, credential: &CredentialRef) -> Result<(), String> {
+    match credential.backend.as_str() {
+        "file" => FileCredentialStore::new(config_path).delete(&credential.key),
+        "native" => NativeCredentialStore.delete(&credential.key),
+        "env" => {
+            Err("APOLLO_TOKEN is provided by the environment and cannot be removed".to_owned())
+        }
+        _ => Ok(()),
+    }
+}
+
+pub fn token_from_env_or_stdin(
+    token_stdin: bool,
+    format: crate::cli::OutputFormat,
+) -> Result<Sensitive, CliError> {
+    if token_stdin {
+        let mut token = String::new();
+        let mut stdin = std::io::stdin();
+        stdin
+            .read_to_string(&mut token)
+            .map_err(|error| CliError::invalid_input(&error.to_string(), format))?;
+        let token = token.trim().to_owned();
+        if token.is_empty() {
+            return Err(CliError::invalid_input("token input was empty", format));
+        }
+        return Ok(Sensitive::new(token));
+    }
+
+    env::var("APOLLO_TOKEN")
+        .ok()
+        .filter(|token| !token.trim().is_empty())
+        .map(Sensitive::new)
+        .ok_or_else(|| {
+            CliError::invalid_input("provide a token with --token-stdin or APOLLO_TOKEN", format)
+        })
+}
+
+fn source_from_backend(backend: &str) -> CredentialSource {
+    match backend {
+        "file" => CredentialSource::File,
+        "native" => CredentialSource::Native,
+        _ => CredentialSource::None,
+    }
+}
+
+fn native_disabled_for_tests() -> bool {
+    env::var("APOLLO_CLI_TEST_DISABLE_NATIVE").is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+    use std::collections::BTreeMap;
+
+    use super::CredentialStore;
+    use crate::redaction::Sensitive;
+
+    #[derive(Default)]
+    struct InMemoryCredentialStore {
+        credentials: RefCell<BTreeMap<String, String>>,
+    }
+
+    impl CredentialStore for InMemoryCredentialStore {
+        fn get(&self, key: &str) -> Result<Option<Sensitive>, String> {
+            Ok(self
+                .credentials
+                .borrow()
+                .get(key)
+                .cloned()
+                .map(Sensitive::new))
+        }
+
+        fn set(&self, key: &str, token: &Sensitive) -> Result<(), String> {
+            self.credentials
+                .borrow_mut()
+                .insert(key.to_owned(), token.expose_secret().to_owned());
+            Ok(())
+        }
+
+        fn delete(&self, key: &str) -> Result<(), String> {
+            self.credentials.borrow_mut().remove(key);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn in_memory_store_supports_set_get_delete() {
+        let store = InMemoryCredentialStore::default();
+        let token = Sensitive::new("secret-token");
+
+        store.set("dev", &token).expect("set token");
+        let stored = store.get("dev").expect("get token").expect("stored token");
+        assert_eq!(stored.expose_secret(), "secret-token");
+
+        store.delete("dev").expect("delete token");
+        assert!(store.get("dev").expect("get after delete").is_none());
+    }
+}

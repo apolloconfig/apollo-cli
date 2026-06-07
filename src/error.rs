@@ -1,0 +1,221 @@
+use crate::cli::OutputFormat;
+use crate::output::{OutputStream, OutputWriter, RenderedOutput, StructuredError};
+
+#[derive(Debug)]
+pub enum CliErrorKind {
+    Parse {
+        message: String,
+    },
+    InvalidConfig {
+        path: String,
+        message: String,
+    },
+    MissingConfigBase {
+        message: String,
+    },
+    ConfirmationRequired {
+        message: String,
+    },
+    CredentialStoreUnavailable {
+        message: String,
+    },
+    InvalidInput {
+        message: String,
+    },
+    NotImplemented {
+        command: String,
+        follow_up_issue: Option<u32>,
+    },
+    ProfileNotFound {
+        profile: String,
+    },
+}
+
+#[derive(Debug)]
+pub struct CliError {
+    kind: CliErrorKind,
+    format: OutputFormat,
+}
+
+impl CliError {
+    pub fn parse(message: String) -> Self {
+        Self {
+            kind: CliErrorKind::Parse { message },
+            format: OutputFormat::Table,
+        }
+    }
+
+    pub fn not_implemented(
+        command: &str,
+        follow_up_issue: Option<u32>,
+        format: OutputFormat,
+    ) -> Self {
+        Self {
+            kind: CliErrorKind::NotImplemented {
+                command: command.to_owned(),
+                follow_up_issue,
+            },
+            format,
+        }
+    }
+
+    pub fn invalid_config(path: &std::path::Path, message: &str, format: OutputFormat) -> Self {
+        Self {
+            kind: CliErrorKind::InvalidConfig {
+                path: path.display().to_string(),
+                message: message.to_owned(),
+            },
+            format,
+        }
+    }
+
+    pub fn missing_config_base(message: &str, format: OutputFormat) -> Self {
+        Self {
+            kind: CliErrorKind::MissingConfigBase {
+                message: message.to_owned(),
+            },
+            format,
+        }
+    }
+
+    pub fn profile_not_found(profile: &str, format: OutputFormat) -> Self {
+        Self {
+            kind: CliErrorKind::ProfileNotFound {
+                profile: profile.to_owned(),
+            },
+            format,
+        }
+    }
+
+    pub fn confirmation_required(message: &str, format: OutputFormat) -> Self {
+        Self {
+            kind: CliErrorKind::ConfirmationRequired {
+                message: message.to_owned(),
+            },
+            format,
+        }
+    }
+
+    pub fn credential_store_unavailable(message: &str, format: OutputFormat) -> Self {
+        Self {
+            kind: CliErrorKind::CredentialStoreUnavailable {
+                message: message.to_owned(),
+            },
+            format,
+        }
+    }
+
+    pub fn invalid_input(message: &str, format: OutputFormat) -> Self {
+        Self {
+            kind: CliErrorKind::InvalidInput {
+                message: message.to_owned(),
+            },
+            format,
+        }
+    }
+
+    pub fn exit_code(&self) -> u8 {
+        match self.kind {
+            CliErrorKind::Parse { .. } => 2,
+            CliErrorKind::InvalidConfig { .. }
+            | CliErrorKind::MissingConfigBase { .. }
+            | CliErrorKind::ConfirmationRequired { .. }
+            | CliErrorKind::CredentialStoreUnavailable { .. }
+            | CliErrorKind::InvalidInput { .. }
+            | CliErrorKind::NotImplemented { .. }
+            | CliErrorKind::ProfileNotFound { .. } => 1,
+        }
+    }
+
+    pub fn render(&self) -> RenderedOutput {
+        match &self.kind {
+            CliErrorKind::Parse { message } => RenderedOutput {
+                stream: OutputStream::Stderr,
+                body: ensure_trailing_newline(message.clone()),
+            },
+            CliErrorKind::NotImplemented {
+                command,
+                follow_up_issue,
+            } => OutputWriter::new(self.format).render_error(&StructuredError {
+                code: "not_implemented",
+                category: "unsupported_operation",
+                message: format!(
+                    "The '{}' command group is scaffolded but not implemented yet.",
+                    command
+                ),
+                command: Some(command.clone()),
+                follow_up_issue: *follow_up_issue,
+                path: None,
+                profile: None,
+            }),
+            CliErrorKind::InvalidConfig { path, message } => OutputWriter::new(self.format)
+                .render_error(&StructuredError {
+                    code: "invalid_config",
+                    category: "invalid_input",
+                    message: format!("Invalid Apollo CLI config at {}: {}", path, message),
+                    command: None,
+                    follow_up_issue: None,
+                    path: Some(path.clone()),
+                    profile: None,
+                }),
+            CliErrorKind::MissingConfigBase { message } => OutputWriter::new(self.format)
+                .render_error(&StructuredError {
+                    code: "missing_config_base",
+                    category: "invalid_input",
+                    message: format!("Cannot resolve Apollo CLI config path: {}", message),
+                    command: None,
+                    follow_up_issue: None,
+                    path: None,
+                    profile: None,
+                }),
+            CliErrorKind::ConfirmationRequired { message } => OutputWriter::new(self.format)
+                .render_error(&StructuredError {
+                    code: "confirmation_required",
+                    category: "confirmation_required",
+                    message: message.clone(),
+                    command: None,
+                    follow_up_issue: Some(5626),
+                    path: None,
+                    profile: None,
+                }),
+            CliErrorKind::CredentialStoreUnavailable { message } => OutputWriter::new(self.format)
+                .render_error(&StructuredError {
+                    code: "credential_store_unavailable",
+                    category: "unsupported_operation",
+                    message: message.clone(),
+                    command: Some("auth".to_owned()),
+                    follow_up_issue: Some(5630),
+                    path: None,
+                    profile: None,
+                }),
+            CliErrorKind::InvalidInput { message } => {
+                OutputWriter::new(self.format).render_error(&StructuredError {
+                    code: "invalid_input",
+                    category: "invalid_input",
+                    message: message.clone(),
+                    command: None,
+                    follow_up_issue: None,
+                    path: None,
+                    profile: None,
+                })
+            }
+            CliErrorKind::ProfileNotFound { profile } => OutputWriter::new(self.format)
+                .render_error(&StructuredError {
+                    code: "profile_not_found",
+                    category: "not_found",
+                    message: format!("Profile '{}' was not found.", profile),
+                    command: Some("profile".to_owned()),
+                    follow_up_issue: Some(5629),
+                    path: None,
+                    profile: Some(profile.clone()),
+                }),
+        }
+    }
+}
+
+fn ensure_trailing_newline(mut body: String) -> String {
+    if !body.ends_with('\n') {
+        body.push('\n');
+    }
+    body
+}
