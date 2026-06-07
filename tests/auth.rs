@@ -189,6 +189,12 @@ fn base_command(home: &TempDir) -> Command {
     command.env_remove("APPDATA");
     command.env("APOLLO_CLI_TEST_DISABLE_NATIVE", "1");
     command.env("HOME", home.path());
+    if cfg!(target_os = "linux") {
+        command.env("XDG_CONFIG_HOME", home.path().join(".config"));
+    }
+    if cfg!(target_os = "windows") {
+        command.env("APPDATA", home.path().join("AppData").join("Roaming"));
+    }
     command
 }
 
@@ -197,20 +203,24 @@ fn temp_home() -> TempDir {
 }
 
 fn config_path(home: &TempDir) -> PathBuf {
-    home.path()
-        .join("Library")
-        .join("Application Support")
-        .join("apollo")
-        .join("config.toml")
+    config_root(home).join("apollo").join("config.toml")
 }
 
 fn credential_file_path(home: &TempDir, key: &str) -> PathBuf {
-    home.path()
-        .join("Library")
-        .join("Application Support")
+    config_root(home)
         .join("apollo")
         .join("credentials")
         .join(format!("{}.token", key))
+}
+
+fn config_root(home: &TempDir) -> PathBuf {
+    if cfg!(target_os = "macos") {
+        home.path().join("Library").join("Application Support")
+    } else if cfg!(target_os = "windows") {
+        home.path().join("AppData").join("Roaming")
+    } else {
+        home.path().join(".config")
+    }
 }
 
 fn write_config(home: &TempDir, body: &str) {
