@@ -1,5 +1,6 @@
 use std::io::{self, BufRead, IsTerminal, Write};
 
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -44,11 +45,8 @@ fn output_from_flags_or_env(cli: &Cli) -> Option<OutputFormat> {
 }
 
 fn non_blank(value: String) -> Option<String> {
-    if value.trim().is_empty() {
-        None
-    } else {
-        Some(value)
-    }
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_owned())
 }
 
 fn execute_init(
@@ -79,13 +77,34 @@ fn execute_auth(
 
     match command {
         AuthCommand::Status => {
+            if std::env::var("APOLLO_TOKEN")
+                .ok()
+                .is_some_and(|token| !token.trim().is_empty())
+            {
+                let profile = cli
+                    .global
+                    .profile
+                    .clone()
+                    .and_then(non_blank)
+                    .or_else(|| std::env::var("APOLLO_PROFILE").ok().and_then(non_blank))
+                    .or_else(|| loaded.config.active_profile.clone().and_then(non_blank));
+                let response = AuthStatusResponse {
+                    authenticated: true,
+                    source: "env".to_owned(),
+                    profile,
+                    backend: Some("env".to_owned()),
+                    key: Some("APOLLO_TOKEN".to_owned()),
+                };
+                return Ok(writer.render_success(&response, response.render_table()));
+            }
+
             let context = resolve_context(cli, &loaded, output)?;
-            let profile = required_profile(&context, output)?;
+            let profile = required_profile(&context, writer_output)?;
             let status = credential::status(&loaded.path, &profile, context.credential.as_ref());
             let response = AuthStatusResponse {
                 authenticated: status.authenticated,
                 source: status.source.as_str().to_owned(),
-                profile,
+                profile: Some(profile),
                 backend: status.backend,
                 key: status.key,
             };
@@ -96,7 +115,10 @@ fn execute_auth(
             store_token_in_file,
         } => {
             let context = resolve_context(cli, &loaded, output)?;
-            let profile = required_profile(&context, output)?;
+            let profile = required_profile(&context, writer_output)?;
+            if !loaded.config.profiles.contains_key(&profile) {
+                return Err(CliError::profile_not_found(&profile, writer_output));
+            }
             let token = credential::token_from_env_or_stdin(token_stdin, writer_output)?;
 
             let credential_ref = store_setup_token(
@@ -178,7 +200,9 @@ fn execute_profile(
             execute_profile_setup(options, cli, output)
         }
         ProfileCommand::List => {
-            let writer = OutputWriter::new(output_from_flags_or_env(cli).unwrap_or(output));
+            let writer_output = resolve_output(cli, &loaded, output)
+                .unwrap_or_else(|_| output_from_flags_or_env(cli).unwrap_or(output));
+            let writer = OutputWriter::new(writer_output);
             let response = ProfileListResponse::from_loaded_config(&loaded);
             Ok(writer.render_success(&response, response.render_table()))
         }
@@ -306,7 +330,8 @@ fn execute_profile_setup(
         config_path: loaded.path.display().to_string(),
         next_steps: vec![
             "apollo profile show".to_owned(),
-            "apollo env list".to_owned(),
+            "apollo app list".to_owned(),
+            "apollo env list --app <appId>".to_owned(),
         ],
     };
     Ok(writer.render_success(&response, response.render_table()))
@@ -327,7 +352,9 @@ fn execute_app(
                 path
             }
         }
-        AppCommand::Get { app_id } => format!("/openapi/v1/apps/{}", encode_path_segment(&app_id)),
+        AppCommand::Get { app_id } => {
+            append_query("/openapi/v1/apps".to_owned(), "appIds", &app_id)
+        }
     };
     openapi.request("GET", &path, None)
 }
@@ -339,7 +366,10 @@ fn execute_env(
 ) -> Result<RenderedOutput, CliError> {
     let openapi = openapi_context(cli, output)?;
     match command {
-        EnvCommand::List => openapi.request("GET", "/openapi/v1/envs", None),
+        EnvCommand::List { app } => {
+            let path = format!("/openapi/v1/apps/{}/envclusters", encode_path_segment(&app));
+            openapi.request("GET", &path, None)
+        }
     }
 }
 
@@ -348,6 +378,9 @@ fn execute_namespace(
     cli: &Cli,
     output: OutputFormat,
 ) -> Result<RenderedOutput, CliError> {
+    if matches!(command, NamespaceCommand::Create { .. }) {
+        require_yes_for_openapi(cli, output)?;
+    }
     let openapi = openapi_context(cli, output)?;
     match command {
         NamespaceCommand::List { scope } => {
@@ -363,15 +396,22 @@ fn execute_namespace(
             name,
             operator,
         } => {
-            require_yes(cli, output)?;
-            let operator = required_operator(operator.as_deref(), &openapi.context, output)?;
-            let path = append_query("/openapi/v1/namespaces".to_owned(), "operator", &operator);
-            let body = json!([{
+            let operator = required_operator(
+                operator.as_deref(),
+                &openapi.context,
+                openapi.context.output,
+            )?;
+            let path = format!(
+                "/openapi/v1/apps/{}/appnamespaces",
+                encode_path_segment(&scope.app)
+            );
+            let body = json!({
                 "appId": scope.app,
-                "env": scope.env,
-                "clusterName": scope.cluster,
-                "appNamespaceName": name,
-            }]);
+                "name": name,
+                "format": "properties",
+                "isPublic": true,
+                "dataChangeCreatedBy": operator,
+            });
             openapi.request("POST", &path, Some(body))
         }
     }
@@ -382,6 +422,9 @@ fn execute_config(
     cli: &Cli,
     output: OutputFormat,
 ) -> Result<RenderedOutput, CliError> {
+    if config_command_requires_confirmation(&command) {
+        require_yes_for_openapi(cli, output)?;
+    }
     let openapi = openapi_context(cli, output)?;
     match command {
         ConfigCommand::List { scope, page, size } => {
@@ -391,11 +434,7 @@ fn execute_config(
             openapi.request("GET", &path, None)
         }
         ConfigCommand::Get { scope, key } => {
-            let path = format!(
-                "{}/items/{}",
-                namespace_path(&scope),
-                encode_path_segment(&key)
-            );
+            let path = item_path(&scope, &key);
             openapi.request("GET", &path, None)
         }
         ConfigCommand::Set {
@@ -405,17 +444,12 @@ fn execute_config(
             comment,
             operator,
         } => {
-            require_yes(cli, output)?;
-            let operator = required_operator(operator.as_deref(), &openapi.context, output)?;
-            let update_path = append_query(
-                format!(
-                    "{}/items/{}",
-                    namespace_path(&scope),
-                    encode_path_segment(&key)
-                ),
-                "createIfNotExists",
-                "true",
-            );
+            let operator = required_operator(
+                operator.as_deref(),
+                &openapi.context,
+                openapi.context.output,
+            )?;
+            let update_path = append_query(item_path(&scope, &key), "createIfNotExists", "true");
             let create_path = append_query(
                 format!("{}/items", namespace_path(&scope)),
                 "operator",
@@ -445,17 +479,12 @@ fn execute_config(
             key,
             operator,
         } => {
-            require_yes(cli, output)?;
-            let operator = required_operator(operator.as_deref(), &openapi.context, output)?;
-            let path = append_query(
-                format!(
-                    "{}/items/{}",
-                    namespace_path(&scope),
-                    encode_path_segment(&key)
-                ),
-                "operator",
-                &operator,
-            );
+            let operator = required_operator(
+                operator.as_deref(),
+                &openapi.context,
+                openapi.context.output,
+            )?;
+            let path = append_query(item_path(&scope, &key), "operator", &operator);
             openapi.request("DELETE", &path, None)
         }
         ConfigCommand::Diff {
@@ -475,8 +504,11 @@ fn execute_config(
             target_namespace,
             operator,
         } => {
-            require_yes(cli, output)?;
-            let operator = required_operator(operator.as_deref(), &openapi.context, output)?;
+            let operator = required_operator(
+                operator.as_deref(),
+                &openapi.context,
+                openapi.context.output,
+            )?;
             let body = sync_body(&scope, target_env, target_cluster, target_namespace);
             let path = append_query(
                 format!("{}/items/synchronize", namespace_path(&scope)),
@@ -493,12 +525,19 @@ fn execute_release(
     cli: &Cli,
     output: OutputFormat,
 ) -> Result<RenderedOutput, CliError> {
+    if release_command_requires_confirmation(&command) {
+        require_yes_for_openapi(cli, output)?;
+    }
     let openapi = openapi_context(cli, output)?;
     match command {
         ReleaseCommand::List { scope, page, size } => {
-            let mut path = format!("{}/releases/active", namespace_path(&scope));
-            path = append_query(path, "page", &page.unwrap_or(DEFAULT_PAGE).to_string());
-            path = append_query(path, "size", &size.unwrap_or(DEFAULT_PAGE_SIZE).to_string());
+            let mut path = format!("{}/releases/latest", namespace_path(&scope));
+            if let Some(page) = page {
+                path = append_query(path, "page", &page.to_string());
+            }
+            if let Some(size) = size {
+                path = append_query(path, "size", &size.to_string());
+            }
             openapi.request("GET", &path, None)
         }
         ReleaseCommand::Create {
@@ -508,8 +547,11 @@ fn execute_release(
             emergency,
             operator,
         } => {
-            require_yes(cli, output)?;
-            let operator = required_operator(operator.as_deref(), &openapi.context, output)?;
+            let operator = required_operator(
+                operator.as_deref(),
+                &openapi.context,
+                openapi.context.output,
+            )?;
             let path = format!("{}/releases", namespace_path(&scope));
             let body = json!({
                 "releaseTitle": title,
@@ -525,8 +567,11 @@ fn execute_release(
             to_release_id,
             operator,
         } => {
-            require_yes(cli, output)?;
-            let operator = required_operator(operator.as_deref(), &openapi.context, output)?;
+            let operator = required_operator(
+                operator.as_deref(),
+                &openapi.context,
+                openapi.context.output,
+            )?;
             let mut path = append_query(
                 format!(
                     "/openapi/v1/envs/{}/releases/{}/rollback",
@@ -545,23 +590,16 @@ fn execute_release(
 }
 
 fn execute_api(args: ApiArgs, cli: &Cli, output: OutputFormat) -> Result<RenderedOutput, CliError> {
+    if http_method_requires_confirmation(args.method) {
+        require_yes_for_openapi(cli, output)?;
+    }
     let openapi = openapi_context(cli, output)?;
     let body = match args.body {
-        Some(body) => Some(
-            serde_json::from_str::<Value>(&body)
-                .map_err(|error| CliError::invalid_input(&error.to_string(), output))?,
-        ),
+        Some(body) => Some(serde_json::from_str::<Value>(&body).map_err(|error| {
+            CliError::invalid_input(&error.to_string(), openapi.context.output)
+        })?),
         None => None,
     };
-    if matches!(
-        args.method,
-        crate::cli::HttpMethod::Post
-            | crate::cli::HttpMethod::Put
-            | crate::cli::HttpMethod::Patch
-            | crate::cli::HttpMethod::Delete
-    ) {
-        require_yes(cli, output)?;
-    }
     openapi.request(args.method.as_str(), &args.path, body)
 }
 
@@ -609,6 +647,45 @@ fn openapi_context(cli: &Cli, output: OutputFormat) -> Result<OpenApiCommandCont
 
 fn render_openapi_response(writer: &OutputWriter, response: &OpenApiResponse) -> RenderedOutput {
     writer.render_success(response, response.render_table())
+}
+
+fn config_command_requires_confirmation(command: &ConfigCommand) -> bool {
+    matches!(
+        command,
+        ConfigCommand::Set { .. } | ConfigCommand::Delete { .. } | ConfigCommand::Apply { .. }
+    )
+}
+
+fn release_command_requires_confirmation(command: &ReleaseCommand) -> bool {
+    matches!(
+        command,
+        ReleaseCommand::Create { .. } | ReleaseCommand::Rollback { .. }
+    )
+}
+
+fn http_method_requires_confirmation(method: crate::cli::HttpMethod) -> bool {
+    matches!(
+        method,
+        crate::cli::HttpMethod::Post
+            | crate::cli::HttpMethod::Put
+            | crate::cli::HttpMethod::Patch
+            | crate::cli::HttpMethod::Delete
+    )
+}
+
+fn require_yes_for_openapi(cli: &Cli, output: OutputFormat) -> Result<(), CliError> {
+    require_yes(cli, output_for_confirmation(cli, output))
+}
+
+fn output_for_confirmation(cli: &Cli, output: OutputFormat) -> OutputFormat {
+    if let Some(output) = output_from_flags_or_env(cli) {
+        return output;
+    }
+
+    load_config(output)
+        .ok()
+        .and_then(|loaded| resolve_output(cli, &loaded, output).ok())
+        .unwrap_or(output)
 }
 
 fn required_server(context: &RuntimeContext, output: OutputFormat) -> Result<String, CliError> {
@@ -676,6 +753,22 @@ fn namespace_path(scope: &NamespaceScopeArgs) -> String {
         ),
         encode_path_segment(&scope.namespace),
     )
+}
+
+fn item_path(scope: &NamespaceScopeArgs, key: &str) -> String {
+    if key.contains('/') || key.contains('\\') {
+        format!(
+            "{}/encodedItems/{}",
+            namespace_path(scope),
+            encode_path_segment(&URL_SAFE_NO_PAD.encode(key.as_bytes()))
+        )
+    } else {
+        format!(
+            "{}/items/{}",
+            namespace_path(scope),
+            encode_path_segment(key)
+        )
+    }
 }
 
 fn sync_body(
@@ -1097,7 +1190,8 @@ impl ProfileSetupResponse {
 struct AuthStatusResponse {
     authenticated: bool,
     source: String,
-    profile: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    profile: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     backend: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1113,7 +1207,9 @@ impl AuthStatusResponse {
         };
         format!(
             "Profile: {}\nStatus: {}\nSource: {}",
-            self.profile, state, self.source
+            self.profile.as_deref().unwrap_or("<none>"),
+            state,
+            self.source
         )
     }
 }

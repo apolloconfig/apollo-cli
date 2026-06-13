@@ -131,7 +131,10 @@ pub enum AppCommand {
 
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
 pub enum EnvCommand {
-    List,
+    List {
+        #[arg(long)]
+        app: String,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]

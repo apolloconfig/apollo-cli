@@ -42,7 +42,7 @@ apollo profile add dev
 apollo profile add prod --use
 apollo app list
 apollo app get sample-app
-apollo env list
+apollo env list --app sample-app
 apollo namespace list --env DEV --app sample-app
 apollo namespace get --env DEV --app sample-app --namespace application
 apollo namespace create --env DEV --app sample-app application --yes
@@ -81,13 +81,13 @@ For local Apollo assembly testing:
 ```bash
 apollo --output json init --store-token-in-file
 apollo profile show
-apollo env list
+apollo env list --app sample-app
 ```
 
 By default, `apollo init` creates a `local` profile with:
 
 - `server = "http://127.0.0.1:8070"`
-- `output = "json"`
+- no persisted `output` unless `--output` is passed
 - `operator = "apollo"`
 - `active_profile = "local"`
 
@@ -288,7 +288,7 @@ cargo test --test openapi
 If you have a local Apollo Portal running, you can also smoke-test against it:
 
 ```bash
-APOLLO_TOKEN="$TOKEN" cargo run -- --server http://localhost:8070 --output json env list
+APOLLO_TOKEN="$TOKEN" cargo run -- --server http://localhost:8070 --output json env list --app sample-app
 APOLLO_TOKEN="$TOKEN" cargo run -- --server http://localhost:8070 --output json app list
 ```
 

@@ -177,6 +177,7 @@ fn config_path_for_platform(
         }
         Platform::Windows => vars
             .get("APPDATA")
+            .filter(|value| !value.is_empty())
             .cloned()
             .map(PathBuf::from)
             .ok_or_else(|| "APPDATA is not set".to_owned())
@@ -229,7 +230,8 @@ fn env_var_non_blank(name: &str) -> Option<String> {
 }
 
 fn non_blank(value: String) -> Option<String> {
-    (!value.trim().is_empty()).then_some(value)
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_owned())
 }
 
 impl OutputFormat {
@@ -323,5 +325,12 @@ mod tests {
                 .join("apollo")
                 .join("config.toml")
         );
+    }
+
+    #[test]
+    fn config_path_treats_empty_windows_appdata_as_unset() {
+        let vars = HashMap::from([(String::from("APPDATA"), OsString::from(""))]);
+        let error = config_path_for_platform(Platform::Windows, &vars).expect_err("appdata");
+        assert_eq!(error, "APPDATA is not set");
     }
 }

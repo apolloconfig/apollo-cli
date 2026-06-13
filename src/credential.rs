@@ -1,15 +1,17 @@
 use std::env;
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
+#[cfg(unix)]
+use std::fs::OpenOptions;
 #[cfg(unix)]
 use std::mem;
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
 
 #[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 use keyring::Entry;
 
@@ -156,11 +158,21 @@ fn write_token_file(path: &Path, token: &str) -> Result<(), String> {
         .mode(0o600)
         .open(path)
         .map_err(|error| error.to_string())?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+        .map_err(|error| error.to_string())?;
     file.write_all(token.as_bytes())
         .map_err(|error| error.to_string())
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn write_token_file(_path: &Path, _token: &str) -> Result<(), String> {
+    Err(
+        "file credential fallback is not available on Windows because ACL restriction is not implemented; use native credential storage"
+            .to_owned(),
+    )
+}
+
+#[cfg(all(not(unix), not(windows)))]
 fn write_token_file(path: &Path, token: &str) -> Result<(), String> {
     fs::write(path, token).map_err(|error| error.to_string())
 }

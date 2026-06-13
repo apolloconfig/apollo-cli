@@ -39,6 +39,34 @@ output = "table"
 }
 
 #[test]
+fn auth_status_reports_environment_token_without_profile() {
+    let home = temp_home();
+
+    let assert = base_command(&home)
+        .env("APOLLO_TOKEN", "secret-from-env")
+        .args([
+            "--server",
+            "https://apollo-dev.example.com",
+            "--output",
+            "json",
+            "auth",
+            "status",
+        ])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let json: Value = serde_json::from_str(&stdout).expect("json stdout");
+
+    assert_eq!(json["authenticated"], true);
+    assert_eq!(json["source"], "env");
+    assert_eq!(json["backend"], "env");
+    assert_eq!(json["key"], "APOLLO_TOKEN");
+    assert!(json["profile"].is_null());
+    assert!(!stdout.contains("secret-from-env"));
+}
+
+#[test]
 fn auth_login_file_fallback_requires_explicit_opt_in() {
     let home = temp_home();
     write_config(
@@ -116,6 +144,59 @@ server = "https://apollo-dev.example.com"
     assert!(!config.contains("secret-from-stdin"));
 }
 
+#[cfg(unix)]
+#[test]
+fn auth_login_tightens_existing_file_credential_permissions() {
+    let home = temp_home();
+    write_config(
+        &home,
+        r#"
+active_profile = "dev"
+
+[profiles.dev]
+server = "https://apollo-dev.example.com"
+
+[profiles.dev.credential]
+backend = "file"
+key = "dev"
+"#,
+    );
+    fs::create_dir_all(credential_file_path(&home, "dev").parent().expect("parent"))
+        .expect("credential dir");
+    fs::write(credential_file_path(&home, "dev"), "old-secret\n").expect("credential file");
+    fs::set_permissions(
+        credential_file_path(&home, "dev"),
+        fs::Permissions::from_mode(0o644),
+    )
+    .expect("set permissive mode");
+
+    base_command(&home)
+        .write_stdin("new-secret\n")
+        .args([
+            "--output",
+            "json",
+            "auth",
+            "login",
+            "--token-stdin",
+            "--store-token-in-file",
+        ])
+        .assert()
+        .success();
+
+    assert_eq!(
+        fs::metadata(credential_file_path(&home, "dev"))
+            .expect("credential metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    assert_eq!(
+        fs::read_to_string(credential_file_path(&home, "dev")).expect("credential"),
+        "new-secret"
+    );
+}
+
 #[test]
 fn auth_status_detects_file_fallback_without_printing_token() {
     let home = temp_home();
@@ -180,6 +261,43 @@ server = "https://apollo-dev.example.com"
     let json: Value = serde_json::from_str(&stderr).expect("json stderr");
 
     assert_eq!(json["error"]["code"], "credential_store_unavailable");
+    assert!(!stderr.contains("secret-from-stdin"));
+    assert!(
+        !config_root(&home)
+            .join("apollo")
+            .join("credentials")
+            .exists()
+    );
+}
+
+#[test]
+fn auth_login_rejects_missing_profile_before_storing_token() {
+    let home = temp_home();
+    write_config(
+        &home,
+        r#"
+active_profile = "missing"
+"#,
+    );
+
+    let assert = base_command(&home)
+        .write_stdin("secret-from-stdin\n")
+        .args([
+            "--output",
+            "json",
+            "auth",
+            "login",
+            "--token-stdin",
+            "--store-token-in-file",
+        ])
+        .assert()
+        .failure();
+
+    assert!(assert.get_output().stdout.is_empty());
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf8 stderr");
+    let json: Value = serde_json::from_str(&stderr).expect("json stderr");
+
+    assert_eq!(json["error"]["code"], "profile_not_found");
     assert!(!stderr.contains("secret-from-stdin"));
     assert!(
         !config_root(&home)

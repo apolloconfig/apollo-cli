@@ -67,7 +67,7 @@ impl OpenApiClient {
             .map_err(|error| CliError::network(&path, &error.to_string(), self.format))?;
 
         if !status.is_success() {
-            let body = sanitize_error_body(&body);
+            let body = sanitize_error_body(&body, self.token.expose_secret());
             return Err(CliError::http_status(
                 status.as_u16(),
                 &path,
@@ -89,13 +89,23 @@ impl OpenApiClient {
     }
 }
 
-fn sanitize_error_body(body: &str) -> String {
+fn sanitize_error_body(body: &str, token: &str) -> String {
     let redactor = Redactor;
     let redacted = serde_json::from_str::<Value>(body)
         .ok()
         .map(|value| redactor.redact_json(value).to_string())
         .unwrap_or_else(|| redactor.redact_text(body));
+    let redacted = redact_exact_token(redacted, token);
     truncate_chars(redacted, MAX_ERROR_BODY_CHARS)
+}
+
+fn redact_exact_token(value: String, token: &str) -> String {
+    let token = token.trim();
+    if token.is_empty() {
+        value
+    } else {
+        value.replace(token, "[REDACTED]")
+    }
 }
 
 fn truncate_chars(value: String, max_chars: usize) -> String {

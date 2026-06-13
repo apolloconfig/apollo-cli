@@ -124,6 +124,32 @@ output = "table"
 }
 
 #[test]
+fn profile_list_uses_active_profile_output_for_rendering() {
+    let home = temp_home();
+    write_config(
+        &home,
+        r#"
+active_profile = "dev"
+
+[profiles.dev]
+server = "https://apollo-dev.example.com"
+output = "json"
+"#,
+    );
+
+    let assert = base_command(&home)
+        .args(["profile", "list"])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let json: Value = serde_json::from_str(&stdout).expect("json stdout");
+
+    assert_eq!(json["activeProfile"], "dev");
+    assert_eq!(json["profiles"][0]["name"], "dev");
+}
+
+#[test]
 fn profile_show_prefers_flags_over_environment() {
     let home = temp_home();
     write_config(
@@ -401,6 +427,40 @@ fn init_ignores_blank_setup_values_and_uses_defaults() {
     assert!(config.contains("operator = \"apollo\""));
     assert!(!config.contains("[profiles.\"\"]"));
     assert!(!config.contains("output = \"json\""));
+}
+
+#[test]
+fn profile_add_trims_setup_values_before_persisting() {
+    let home = temp_home();
+
+    let assert = base_command(&home)
+        .args([
+            "--output",
+            "json",
+            "--server",
+            "  https://apollo-dev.example.com/  ",
+            "profile",
+            "add",
+            "  dev  ",
+            "--operator",
+            "  alice  ",
+        ])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let json: Value = serde_json::from_str(&stdout).expect("json stdout");
+
+    assert_eq!(json["profile"], "dev");
+    assert_eq!(json["server"], "https://apollo-dev.example.com/");
+    assert_eq!(json["operator"], "alice");
+
+    let config = fs::read_to_string(config_path(&home)).expect("config file");
+    assert!(config.contains("[profiles.dev]"));
+    assert!(config.contains("server = \"https://apollo-dev.example.com/\""));
+    assert!(config.contains("operator = \"alice\""));
+    assert!(!config.contains("  dev  "));
+    assert!(!config.contains("  alice  "));
 }
 
 #[test]
