@@ -284,6 +284,34 @@ output = "json"
 }
 
 #[test]
+fn profile_use_honors_active_profile_output_config() {
+    let home = temp_home();
+    write_config(
+        &home,
+        r#"
+active_profile = "dev"
+
+[profiles.dev]
+server = "https://apollo-dev.example.com"
+output = "json"
+
+[profiles.prod]
+server = "https://apollo-prod.example.com"
+output = "table"
+"#,
+    );
+
+    let assert = base_command(&home)
+        .args(["profile", "use", "prod"])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let json: Value = serde_json::from_str(&stdout).expect("json stdout");
+    assert_eq!(json["activeProfile"], "prod");
+}
+
+#[test]
 fn profile_use_recovers_when_active_profile_is_stale() {
     let home = temp_home();
     write_config(

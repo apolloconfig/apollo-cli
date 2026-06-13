@@ -460,18 +460,20 @@ fn namespace_create_with_yes_sends_namespace_instance_payload() {
 
     let request = server.request();
     assert_eq!(request.method, "POST");
-    assert_eq!(request.path, "/openapi/v1/apps/demo/appnamespaces");
+    assert_eq!(request.path, "/openapi/v1/namespaces?operator=apollo-bot");
     let body: Value = serde_json::from_str(&request.body).expect("json body");
-    assert_eq!(body["appId"], "demo");
-    assert_eq!(body["name"], "application");
-    assert_eq!(body["format"], "properties");
-    assert_eq!(body["isPublic"], false);
-    assert_eq!(body["dataChangeCreatedBy"], "apollo-bot");
+    assert_eq!(body[0]["appId"], "demo");
+    assert_eq!(body[0]["env"], "DEV");
+    assert_eq!(body[0]["clusterName"], "default");
+    assert_eq!(body[0]["appNamespaceName"], "application");
 }
 
 #[test]
 fn namespace_create_with_public_flag_sends_public_namespace_payload() {
-    let server = TestServer::empty();
+    let server = TestServer::sequence(vec![
+        (200, "application/json", r#"{"name":"public.application"}"#),
+        (200, "application/json", "{}"),
+    ]);
     let home = temp_home();
     write_config(
         &home,
@@ -496,10 +498,26 @@ fn namespace_create_with_public_flag_sends_public_namespace_payload() {
         .assert()
         .success();
 
-    let request = server.request();
-    let body: Value = serde_json::from_str(&request.body).expect("json body");
-    assert_eq!(body["isPublic"], true);
-    assert_eq!(body["dataChangeCreatedBy"], "apollo-bot");
+    let requests = server.requests(2);
+    assert_eq!(requests[0].method, "POST");
+    assert_eq!(requests[0].path, "/openapi/v1/apps/demo/appnamespaces");
+    let app_namespace_body: Value = serde_json::from_str(&requests[0].body).expect("json body");
+    assert_eq!(app_namespace_body["appId"], "demo");
+    assert_eq!(app_namespace_body["name"], "application");
+    assert_eq!(app_namespace_body["format"], "properties");
+    assert_eq!(app_namespace_body["isPublic"], true);
+    assert_eq!(app_namespace_body["dataChangeCreatedBy"], "apollo-bot");
+
+    assert_eq!(requests[1].method, "POST");
+    assert_eq!(
+        requests[1].path,
+        "/openapi/v1/namespaces?operator=apollo-bot"
+    );
+    let namespace_body: Value = serde_json::from_str(&requests[1].body).expect("json body");
+    assert_eq!(namespace_body[0]["appId"], "demo");
+    assert_eq!(namespace_body[0]["env"], "DEV");
+    assert_eq!(namespace_body[0]["clusterName"], "default");
+    assert_eq!(namespace_body[0]["appNamespaceName"], "public.application");
 }
 
 #[test]
@@ -603,6 +621,50 @@ fn config_diff_populates_sync_items_from_source_namespace() {
     let body: Value = serde_json::from_str(&requests[1].body).expect("json body");
     assert_eq!(body["syncItems"][0]["key"], "timeout");
     assert_eq!(body["syncItems"][0]["value"], "3000");
+}
+
+#[test]
+fn config_diff_keeps_source_sync_items_unredacted_while_redacting_output() {
+    let server = TestServer::sequence(vec![
+        (
+            200,
+            "application/json",
+            r#"{"content":[{"key":"token-value","value":"consumer-token"}],"page":0,"size":500,"total":1}"#,
+        ),
+        (200, "application/json", r#"{"message":"consumer-token"}"#),
+    ]);
+    let home = temp_home();
+    write_config(
+        &home,
+        &profile_config_with_operator(&server.url(), "apollo-bot"),
+    );
+
+    let assert = base_command(&home)
+        .env("APOLLO_TOKEN", "consumer-token")
+        .args([
+            "--output",
+            "json",
+            "config",
+            "diff",
+            "--env",
+            "DEV",
+            "--app",
+            "demo",
+            "--target-env",
+            "FAT",
+        ])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let json: Value = serde_json::from_str(&stdout).expect("json stdout");
+    assert_eq!(json["data"]["message"], "[REDACTED]");
+    assert!(!stdout.contains("consumer-token"));
+
+    let requests = server.requests(2);
+    let body: Value = serde_json::from_str(&requests[1].body).expect("json body");
+    assert_eq!(body["syncItems"][0]["key"], "token-value");
+    assert_eq!(body["syncItems"][0]["value"], "consumer-token");
 }
 
 #[derive(Debug)]

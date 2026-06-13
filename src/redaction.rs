@@ -56,6 +56,7 @@ impl Redactor {
     }
 }
 
+#[derive(Clone)]
 pub struct Sensitive(String);
 
 impl Sensitive {

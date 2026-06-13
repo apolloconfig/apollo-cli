@@ -1,5 +1,6 @@
-use serde::Serialize;
+use serde::{Serialize, Serializer, ser::SerializeStruct};
 use serde_json::Value;
+use std::fmt;
 use std::time::Duration;
 
 use crate::cli::OutputFormat;
@@ -9,15 +10,42 @@ use crate::redaction::{Redactor, Sensitive};
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_ERROR_BODY_CHARS: usize = 4096;
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone)]
 pub struct OpenApiResponse {
     pub status: u16,
     pub data: Value,
+    redaction_token: Sensitive,
 }
 
 impl OpenApiResponse {
     pub fn render_table(&self) -> String {
-        serde_json::to_string_pretty(&self.data).expect("openapi response table json")
+        serde_json::to_string_pretty(&self.redacted_data()).expect("openapi response table json")
+    }
+
+    fn redacted_data(&self) -> Value {
+        redact_exact_token_value(self.data.clone(), self.redaction_token.expose_secret())
+    }
+}
+
+impl fmt::Debug for OpenApiResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OpenApiResponse")
+            .field("status", &self.status)
+            .field("data", &self.redacted_data())
+            .finish()
+    }
+}
+
+impl Serialize for OpenApiResponse {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("OpenApiResponse", 2)?;
+        state.serialize_field("status", &self.status)?;
+        state.serialize_field("data", &self.redacted_data())?;
+        state.end()
     }
 }
 
@@ -76,7 +104,6 @@ impl OpenApiClient {
             ));
         }
 
-        let body = redact_exact_token(body, self.token.expose_secret());
         let data = if body.trim().is_empty() {
             Value::Null
         } else {
@@ -86,6 +113,7 @@ impl OpenApiClient {
         Ok(OpenApiResponse {
             status: status.as_u16(),
             data,
+            redaction_token: self.token.clone(),
         })
     }
 }
@@ -106,6 +134,29 @@ fn redact_exact_token(value: String, token: &str) -> String {
         value
     } else {
         value.replace(token, "[REDACTED]")
+    }
+}
+
+fn redact_exact_token_value(value: Value, token: &str) -> Value {
+    let token = token.trim();
+    if token.is_empty() {
+        return value;
+    }
+
+    match value {
+        Value::String(value) => Value::String(value.replace(token, "[REDACTED]")),
+        Value::Array(values) => Value::Array(
+            values
+                .into_iter()
+                .map(|value| redact_exact_token_value(value, token))
+                .collect(),
+        ),
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .map(|(key, value)| (key, redact_exact_token_value(value, token)))
+                .collect(),
+        ),
+        value => value,
     }
 }
 

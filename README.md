@@ -61,8 +61,9 @@ apollo api post /openapi/v1/apps --body '{"app":{"appId":"sample-app"}}' --yes
 
 These commands use existing Apollo Portal OpenAPI endpoints only. Deprecated Portal WebAPI
 endpoints are intentionally not used.
-`apollo namespace create` creates a private namespace by default. Pass `--public` only when the
-namespace should be public.
+`apollo namespace create` creates the namespace in the requested environment and cluster. It creates
+a private namespace by default. Pass `--public` only when the namespace should first be registered as
+a public AppNamespace and then created in the requested environment and cluster.
 
 ## Global flags
 
@@ -252,6 +253,7 @@ Path and payload mapping follows the current Apollo Portal OpenAPI contract, inc
 - `GET /openapi/v1/envs/{env}/apps/{appId}/clusters/{clusterName}/namespaces`
 - `GET|PUT|DELETE /openapi/v1/envs/{env}/apps/{appId}/clusters/{clusterName}/namespaces/{namespaceName}/items/{key}`
 - `POST /openapi/v1/envs/{env}/apps/{appId}/clusters/{clusterName}/namespaces/{namespaceName}/items/diff`
+- `POST /openapi/v1/apps/{appId}/appnamespaces` for explicit public namespace registration
 - `POST /openapi/v1/namespaces`
 - `POST /openapi/v1/envs/{env}/apps/{appId}/clusters/{clusterName}/namespaces/{namespaceName}/items/synchronize`
 - `GET /openapi/v1/envs/{env}/apps/{appId}/clusters/{clusterName}/namespaces/{namespaceName}/releases/active`

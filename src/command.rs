@@ -218,7 +218,8 @@ fn execute_profile(
             Ok(writer.render_success(&response, response.render_table()))
         }
         ProfileCommand::Use { name } => {
-            let writer_output = output_from_flags_or_env(cli).unwrap_or(output);
+            let writer_output = resolve_output(cli, &loaded, output)
+                .unwrap_or_else(|_| output_from_flags_or_env(cli).unwrap_or(output));
             let writer = OutputWriter::new(writer_output);
             if !loaded.config.profiles.contains_key(&name) {
                 return Err(CliError::profile_not_found(&name, writer_output));
@@ -407,17 +408,35 @@ fn execute_namespace(
                 &openapi.context,
                 openapi.context.output,
             )?;
-            let path = format!(
-                "/openapi/v1/apps/{}/appnamespaces",
-                encode_path_segment(&scope.app)
-            );
-            let body = json!({
+            let app_namespace_name = if public_namespace {
+                let path = format!(
+                    "/openapi/v1/apps/{}/appnamespaces",
+                    encode_path_segment(&scope.app)
+                );
+                let body = json!({
+                    "appId": scope.app,
+                    "name": name,
+                    "format": "properties",
+                    "isPublic": true,
+                    "dataChangeCreatedBy": operator,
+                });
+                let response = openapi.client.request("POST", &path, Some(body))?;
+                response
+                    .data
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or(&name)
+                    .to_owned()
+            } else {
+                name
+            };
+            let path = append_query("/openapi/v1/namespaces".to_owned(), "operator", &operator);
+            let body = json!([{
                 "appId": scope.app,
-                "name": name,
-                "format": "properties",
-                "isPublic": public_namespace,
-                "dataChangeCreatedBy": operator,
-            });
+                "env": scope.env,
+                "clusterName": scope.cluster,
+                "appNamespaceName": app_namespace_name,
+            }]);
             openapi.request("POST", &path, Some(body))
         }
     }
