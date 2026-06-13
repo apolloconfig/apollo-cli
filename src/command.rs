@@ -119,7 +119,7 @@ fn execute_auth(
             if !loaded.config.profiles.contains_key(&profile) {
                 return Err(CliError::profile_not_found(&profile, writer_output));
             }
-            let token = credential::token_from_env_or_stdin(token_stdin, writer_output)?;
+            let token = credential::token_from_login_input(token_stdin, writer_output)?;
 
             let credential_ref = store_setup_token(
                 &loaded.path,

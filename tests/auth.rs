@@ -95,6 +95,35 @@ server = "https://apollo-dev.example.com"
 }
 
 #[test]
+fn auth_login_does_not_persist_apollo_token_from_environment() {
+    let home = temp_home();
+    write_config(
+        &home,
+        r#"
+active_profile = "dev"
+
+[profiles.dev]
+server = "https://apollo-dev.example.com"
+"#,
+    );
+
+    let assert = base_command(&home)
+        .env("APOLLO_TOKEN", "secret-from-env")
+        .args(["--output", "json", "auth", "login", "--store-token-in-file"])
+        .assert()
+        .failure();
+
+    assert!(assert.get_output().stdout.is_empty());
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf8 stderr");
+    let json: Value = serde_json::from_str(&stderr).expect("json stderr");
+
+    assert_eq!(json["error"]["code"], "invalid_input");
+    assert!(stderr.contains("APOLLO_TOKEN is read-only"));
+    assert!(!stderr.contains("secret-from-env"));
+    assert!(!credential_file_path(&home, "dev").exists());
+}
+
+#[test]
 fn auth_login_can_store_file_fallback_token_without_printing_it() {
     let home = temp_home();
     write_config(

@@ -272,6 +272,25 @@ pub fn token_from_env_or_stdin(
     ))
 }
 
+pub fn token_from_login_input(
+    token_stdin: bool,
+    format: crate::cli::OutputFormat,
+) -> Result<Sensitive, CliError> {
+    if token_stdin {
+        let stdin = std::io::stdin();
+        return token_from_reader(stdin.lock(), format);
+    }
+
+    if std::io::stdin().is_terminal() && std::io::stderr().is_terminal() {
+        return prompt_token(format);
+    }
+
+    Err(CliError::invalid_input(
+        "provide a token with interactive prompt or --token-stdin; APOLLO_TOKEN is read-only and is not persisted by auth login",
+        format,
+    ))
+}
+
 pub fn prompt_token(format: crate::cli::OutputFormat) -> Result<Sensitive, CliError> {
     let token = prompt_hidden("Consumer token: ", format)?;
     token_from_value(token, format)
