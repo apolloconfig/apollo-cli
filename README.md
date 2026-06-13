@@ -61,6 +61,8 @@ apollo api post /openapi/v1/apps --body '{"app":{"appId":"sample-app"}}' --yes
 
 These commands use existing Apollo Portal OpenAPI endpoints only. Deprecated Portal WebAPI
 endpoints are intentionally not used.
+`apollo namespace create` creates a private namespace by default. Pass `--public` only when the
+namespace should be public.
 
 ## Global flags
 

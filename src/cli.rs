@@ -153,6 +153,8 @@ pub enum NamespaceCommand {
         name: String,
         #[arg(long)]
         operator: Option<String>,
+        #[arg(long = "public")]
+        public_namespace: bool,
     },
 }
 

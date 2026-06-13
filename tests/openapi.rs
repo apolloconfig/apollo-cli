@@ -175,7 +175,7 @@ fn namespace_config_and_release_commands_map_to_openapi_paths() {
         .success();
     assert_eq!(
         release_server.request().path,
-        "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/application/releases/latest"
+        "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/application/releases/active?page=0&size=20"
     );
 }
 
@@ -465,13 +465,53 @@ fn namespace_create_with_yes_sends_namespace_instance_payload() {
     assert_eq!(body["appId"], "demo");
     assert_eq!(body["name"], "application");
     assert_eq!(body["format"], "properties");
+    assert_eq!(body["isPublic"], false);
+    assert_eq!(body["dataChangeCreatedBy"], "apollo-bot");
+}
+
+#[test]
+fn namespace_create_with_public_flag_sends_public_namespace_payload() {
+    let server = TestServer::empty();
+    let home = temp_home();
+    write_config(
+        &home,
+        &profile_config_with_operator(&server.url(), "apollo-bot"),
+    );
+
+    base_command(&home)
+        .env("APOLLO_TOKEN", "consumer-token")
+        .args([
+            "--yes",
+            "--output",
+            "json",
+            "namespace",
+            "create",
+            "--env",
+            "DEV",
+            "--app",
+            "demo",
+            "--public",
+            "application",
+        ])
+        .assert()
+        .success();
+
+    let request = server.request();
+    let body: Value = serde_json::from_str(&request.body).expect("json body");
     assert_eq!(body["isPublic"], true);
     assert_eq!(body["dataChangeCreatedBy"], "apollo-bot");
 }
 
 #[test]
 fn config_apply_with_yes_uses_synchronize_endpoint() {
-    let server = TestServer::empty();
+    let server = TestServer::sequence(vec![
+        (
+            200,
+            "application/json",
+            r#"{"content":[{"key":"timeout","value":"3000"}],"page":0,"size":500,"total":1}"#,
+        ),
+        (200, "application/json", "{}"),
+    ]);
     let home = temp_home();
     write_config(
         &home,
@@ -496,23 +536,36 @@ fn config_apply_with_yes_uses_synchronize_endpoint() {
         .assert()
         .success();
 
-    let request = server.request();
-    assert_eq!(request.method, "POST");
+    let requests = server.requests(2);
+    assert_eq!(requests[0].method, "GET");
     assert_eq!(
-        request.path,
+        requests[0].path,
+        "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/application/items?page=0&size=500"
+    );
+    assert_eq!(requests[1].method, "POST");
+    assert_eq!(
+        requests[1].path,
         "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/application/items/synchronize?operator=apollo-bot"
     );
-    let body: Value = serde_json::from_str(&request.body).expect("json body");
+    let body: Value = serde_json::from_str(&requests[1].body).expect("json body");
     assert_eq!(body["syncToNamespaces"][0]["appId"], "demo");
     assert_eq!(body["syncToNamespaces"][0]["env"], "FAT");
     assert_eq!(body["syncToNamespaces"][0]["clusterName"], "default");
     assert_eq!(body["syncToNamespaces"][0]["namespaceName"], "application");
-    assert_eq!(body["syncItems"], Value::Array(vec![]));
+    assert_eq!(body["syncItems"][0]["key"], "timeout");
+    assert_eq!(body["syncItems"][0]["value"], "3000");
 }
 
 #[test]
-fn config_diff_sends_empty_sync_items() {
-    let server = TestServer::empty();
+fn config_diff_populates_sync_items_from_source_namespace() {
+    let server = TestServer::sequence(vec![
+        (
+            200,
+            "application/json",
+            r#"{"content":[{"key":"timeout","value":"3000"}],"page":0,"size":500,"total":1}"#,
+        ),
+        (200, "application/json", "{}"),
+    ]);
     let home = temp_home();
     write_config(
         &home,
@@ -536,14 +589,20 @@ fn config_diff_sends_empty_sync_items() {
         .assert()
         .success();
 
-    let request = server.request();
-    assert_eq!(request.method, "POST");
+    let requests = server.requests(2);
+    assert_eq!(requests[0].method, "GET");
     assert_eq!(
-        request.path,
+        requests[0].path,
+        "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/application/items?page=0&size=500"
+    );
+    assert_eq!(requests[1].method, "POST");
+    assert_eq!(
+        requests[1].path,
         "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/application/items/diff"
     );
-    let body: Value = serde_json::from_str(&request.body).expect("json body");
-    assert_eq!(body["syncItems"], Value::Array(vec![]));
+    let body: Value = serde_json::from_str(&requests[1].body).expect("json body");
+    assert_eq!(body["syncItems"][0]["key"], "timeout");
+    assert_eq!(body["syncItems"][0]["value"], "3000");
 }
 
 #[derive(Debug)]

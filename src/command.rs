@@ -20,6 +20,7 @@ use crate::redaction::Sensitive;
 
 const DEFAULT_PAGE: u32 = 0;
 const DEFAULT_PAGE_SIZE: u32 = 20;
+const SYNC_ITEMS_PAGE_SIZE: u32 = 500;
 const DEFAULT_INIT_PROFILE: &str = "local";
 const DEFAULT_INIT_SERVER: &str = "http://127.0.0.1:8070";
 const DEFAULT_INIT_OPERATOR: &str = "apollo";
@@ -399,6 +400,7 @@ fn execute_namespace(
             scope,
             name,
             operator,
+            public_namespace,
         } => {
             let operator = required_operator(
                 operator.as_deref(),
@@ -413,7 +415,7 @@ fn execute_namespace(
                 "appId": scope.app,
                 "name": name,
                 "format": "properties",
-                "isPublic": true,
+                "isPublic": public_namespace,
                 "dataChangeCreatedBy": operator,
             });
             openapi.request("POST", &path, Some(body))
@@ -500,7 +502,14 @@ fn execute_config(
             target_cluster,
             target_namespace,
         } => {
-            let body = sync_body(&scope, target_env, target_cluster, target_namespace);
+            let sync_items = source_sync_items(&openapi, &scope)?;
+            let body = sync_body(
+                &scope,
+                target_env,
+                target_cluster,
+                target_namespace,
+                sync_items,
+            );
             let path = format!("{}/items/diff", namespace_path(&scope));
             openapi.request("POST", &path, Some(body))
         }
@@ -516,7 +525,14 @@ fn execute_config(
                 &openapi.context,
                 openapi.context.output,
             )?;
-            let body = sync_body(&scope, target_env, target_cluster, target_namespace);
+            let sync_items = source_sync_items(&openapi, &scope)?;
+            let body = sync_body(
+                &scope,
+                target_env,
+                target_cluster,
+                target_namespace,
+                sync_items,
+            );
             let path = append_query(
                 format!("{}/items/synchronize", namespace_path(&scope)),
                 "operator",
@@ -538,13 +554,9 @@ fn execute_release(
     let openapi = openapi_context(cli, output)?;
     match command {
         ReleaseCommand::List { scope, page, size } => {
-            let mut path = format!("{}/releases/latest", namespace_path(&scope));
-            if let Some(page) = page {
-                path = append_query(path, "page", &page.to_string());
-            }
-            if let Some(size) = size {
-                path = append_query(path, "size", &size.to_string());
-            }
+            let mut path = format!("{}/releases/active", namespace_path(&scope));
+            path = append_query(path, "page", &page.unwrap_or(DEFAULT_PAGE).to_string());
+            path = append_query(path, "size", &size.unwrap_or(DEFAULT_PAGE_SIZE).to_string());
             openapi.request("GET", &path, None)
         }
         ReleaseCommand::Create {
@@ -845,11 +857,53 @@ fn item_path(scope: &NamespaceScopeArgs, key: &str) -> String {
     }
 }
 
+fn source_sync_items(
+    openapi: &OpenApiCommandContext,
+    scope: &NamespaceScopeArgs,
+) -> Result<Vec<Value>, CliError> {
+    let mut items = Vec::new();
+    let mut page = DEFAULT_PAGE;
+
+    loop {
+        let mut path = format!("{}/items", namespace_path(scope));
+        path = append_query(path, "page", &page.to_string());
+        path = append_query(path, "size", &SYNC_ITEMS_PAGE_SIZE.to_string());
+        let response = openapi.client.request("GET", &path, None)?;
+        let content = item_page_content(&response.data, openapi.context.output)?;
+        let content_len = content.len();
+        items.extend(content);
+
+        let total = response.data.get("total").and_then(Value::as_u64);
+        if total.is_some_and(|total| items.len() as u64 >= total)
+            || content_len < SYNC_ITEMS_PAGE_SIZE as usize
+        {
+            break;
+        }
+        page += 1;
+    }
+
+    Ok(items)
+}
+
+fn item_page_content(data: &Value, output: OutputFormat) -> Result<Vec<Value>, CliError> {
+    data.get("content")
+        .and_then(Value::as_array)
+        .or_else(|| data.as_array())
+        .cloned()
+        .ok_or_else(|| {
+            CliError::invalid_input(
+                "OpenAPI item list response did not contain a content array",
+                output,
+            )
+        })
+}
+
 fn sync_body(
     scope: &NamespaceScopeArgs,
     target_env: String,
     target_cluster: String,
     target_namespace: Option<String>,
+    sync_items: Vec<Value>,
 ) -> Value {
     json!({
         "syncToNamespaces": [{
@@ -858,7 +912,7 @@ fn sync_body(
             "clusterName": target_cluster,
             "namespaceName": target_namespace.unwrap_or_else(|| scope.namespace.clone()),
         }],
-        "syncItems": [],
+        "syncItems": sync_items,
     })
 }
 
