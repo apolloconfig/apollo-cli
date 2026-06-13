@@ -39,10 +39,13 @@ impl OutputWriter {
         match self.format {
             OutputFormat::Json => {
                 let value = redactor.redact_json(json!({ "error": error }));
-                RenderedOutput::stdout(
-                    serde_json::to_string_pretty(&value)
-                        .expect("structured error json serialization"),
-                )
+                RenderedOutput {
+                    stream: OutputStream::Stderr,
+                    body: ensure_trailing_newline(
+                        serde_json::to_string_pretty(&value)
+                            .expect("structured error json serialization"),
+                    ),
+                }
             }
             OutputFormat::Table => {
                 let mut lines = vec![redactor.redact_text(&error.message)];

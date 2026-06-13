@@ -1,5 +1,5 @@
 use std::env;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
@@ -9,7 +9,7 @@ use std::mem;
 use std::os::fd::AsRawFd;
 
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::OpenOptionsExt;
 
 use keyring::Entry;
 
@@ -103,14 +103,15 @@ impl FileCredentialStore {
         }
     }
 
-    pub fn path_for_key(&self, key: &str) -> PathBuf {
-        self.base_dir.join(format!("{}.token", key))
+    pub fn path_for_key(&self, key: &str) -> Result<PathBuf, String> {
+        validate_file_credential_key(key)?;
+        Ok(self.base_dir.join(format!("{}.token", key)))
     }
 }
 
 impl CredentialStore for FileCredentialStore {
     fn get(&self, key: &str) -> Result<Option<Sensitive>, String> {
-        let path = self.path_for_key(key);
+        let path = self.path_for_key(key)?;
         if !path.exists() {
             return Ok(None);
         }
@@ -120,23 +121,48 @@ impl CredentialStore for FileCredentialStore {
 
     fn set(&self, key: &str, token: &Sensitive) -> Result<(), String> {
         fs::create_dir_all(&self.base_dir).map_err(|error| error.to_string())?;
-        let path = self.path_for_key(key);
-        fs::write(&path, token.expose_secret()).map_err(|error| error.to_string())?;
-        #[cfg(unix)]
-        {
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
-                .map_err(|error| error.to_string())?;
-        }
+        let path = self.path_for_key(key)?;
+        write_token_file(&path, token.expose_secret())?;
         Ok(())
     }
 
     fn delete(&self, key: &str) -> Result<(), String> {
-        let path = self.path_for_key(key);
+        let path = self.path_for_key(key)?;
         if path.exists() {
             fs::remove_file(path).map_err(|error| error.to_string())?;
         }
         Ok(())
     }
+}
+
+fn validate_file_credential_key(key: &str) -> Result<(), String> {
+    if key.trim().is_empty() {
+        return Err("credential key must not be empty".to_owned());
+    }
+    if key.contains('/') || key.contains('\\') {
+        return Err("credential key must not contain path separators".to_owned());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn write_token_file(path: &Path, token: &str) -> Result<(), String> {
+    use std::io::Write as _;
+
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|error| error.to_string())?;
+    file.write_all(token.as_bytes())
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(not(unix))]
+fn write_token_file(path: &Path, token: &str) -> Result<(), String> {
+    fs::write(path, token).map_err(|error| error.to_string())
 }
 
 pub fn status(

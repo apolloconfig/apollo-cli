@@ -1,4 +1,4 @@
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
 
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -8,8 +8,8 @@ use crate::cli::{
     NamespaceCommand, NamespaceScopeArgs, OutputFormat, ProfileCommand, ReleaseCommand,
 };
 use crate::config::{
-    CredentialRef, LoadedConfig, ProfileConfig, RuntimeContext, load_config, resolve_context,
-    resolve_output, save_config,
+    CredentialRef, LoadedConfig, ProfileConfig, RuntimeContext, load_config, read_env_output,
+    resolve_context, resolve_output, save_config,
 };
 use crate::credential;
 use crate::error::CliError;
@@ -24,7 +24,7 @@ const DEFAULT_INIT_SERVER: &str = "http://127.0.0.1:8070";
 const DEFAULT_INIT_OPERATOR: &str = "apollo";
 
 pub fn execute(cli: Cli) -> Result<RenderedOutput, CliError> {
-    let output = cli.global.output.unwrap_or(OutputFormat::Table);
+    let output = output_from_flags_or_env(&cli).unwrap_or(OutputFormat::Table);
 
     match &cli.command {
         Commands::Init(args) => execute_init(args.clone(), &cli, output),
@@ -37,6 +37,10 @@ pub fn execute(cli: Cli) -> Result<RenderedOutput, CliError> {
         Commands::Release { command } => execute_release(command.clone(), &cli, output),
         Commands::Api(args) => execute_api(args.clone(), &cli, output),
     }
+}
+
+fn output_from_flags_or_env(cli: &Cli) -> Option<OutputFormat> {
+    cli.global.output.or_else(read_env_output)
 }
 
 fn execute_init(
@@ -151,7 +155,6 @@ fn execute_profile(
     output: OutputFormat,
 ) -> Result<RenderedOutput, CliError> {
     let loaded = load_config(output)?;
-    let writer = OutputWriter::new(resolve_output(cli, &loaded, output)?);
 
     match command {
         ProfileCommand::Add(args) => {
@@ -167,22 +170,26 @@ fn execute_profile(
             execute_profile_setup(options, cli, output)
         }
         ProfileCommand::List => {
+            let writer = OutputWriter::new(output_from_flags_or_env(cli).unwrap_or(output));
             let response = ProfileListResponse::from_loaded_config(&loaded);
             Ok(writer.render_success(&response, response.render_table()))
         }
         ProfileCommand::Show => {
+            let writer = OutputWriter::new(resolve_output(cli, &loaded, output)?);
             let context = resolve_context(cli, &loaded, output)?;
             let response = ProfileShowResponse::from_context(&loaded, context);
             Ok(writer.render_success(&response, response.render_table()))
         }
         ProfileCommand::Use { name } => {
+            let writer_output = output_from_flags_or_env(cli).unwrap_or(output);
+            let writer = OutputWriter::new(writer_output);
             if !loaded.config.profiles.contains_key(&name) {
-                return Err(CliError::profile_not_found(&name, output));
+                return Err(CliError::profile_not_found(&name, writer_output));
             }
 
             let mut config = loaded.config.clone();
             config.active_profile = Some(name.clone());
-            save_config(&loaded.path, &config, output)?;
+            save_config(&loaded.path, &config, writer_output)?;
 
             let response = ProfileUseResponse {
                 active_profile: name.clone(),
@@ -206,6 +213,15 @@ enum ProfileSetupMode {
     Add,
 }
 
+impl ProfileSetupMode {
+    fn command_name(self) -> &'static str {
+        match self {
+            Self::Init => "init",
+            Self::Add => "profile add",
+        }
+    }
+}
+
 struct ProfileSetupOptions {
     mode: ProfileSetupMode,
     name: Option<String>,
@@ -222,7 +238,7 @@ fn execute_profile_setup(
     output: OutputFormat,
 ) -> Result<RenderedOutput, CliError> {
     let loaded = load_config(output)?;
-    let writer_output = resolve_output(cli, &loaded, output)?;
+    let writer_output = output_from_flags_or_env(cli).unwrap_or(output);
     let writer = OutputWriter::new(writer_output);
     let interactive = is_interactive_terminal();
 
@@ -230,6 +246,7 @@ fn execute_profile_setup(
     if loaded.config.profiles.contains_key(&profile_name) && !options.overwrite {
         return Err(CliError::profile_already_exists(
             &profile_name,
+            options.mode.command_name(),
             writer_output,
         ));
     }
@@ -237,12 +254,13 @@ fn execute_profile_setup(
     let server = resolve_setup_server(&options, cli, interactive, writer_output)?;
     let profile_output = cli.global.output.unwrap_or(OutputFormat::Json);
     let operator = resolve_setup_operator(&options, interactive, writer_output)?;
+    let existing_profile = loaded.config.profiles.get(&profile_name);
 
     let mut profile_config = ProfileConfig {
         server: Some(server.clone()),
-        output: Some(profile_output),
+        output: cli.global.output,
         operator: operator.clone(),
-        credential: None,
+        credential: existing_profile.and_then(|profile| profile.credential.clone()),
     };
 
     let credential = resolve_setup_token(&options, interactive, writer_output)?
@@ -257,7 +275,9 @@ fn execute_profile_setup(
             )
         })
         .transpose()?;
-    profile_config.credential = credential.clone();
+    if let Some(credential) = credential.clone() {
+        profile_config.credential = Some(credential);
+    }
 
     let mut config = loaded.config.clone();
     config.profiles.insert(profile_name.clone(), profile_config);
@@ -583,12 +603,16 @@ fn render_openapi_response(writer: &OutputWriter, response: &OpenApiResponse) ->
 }
 
 fn required_server(context: &RuntimeContext, output: OutputFormat) -> Result<String, CliError> {
-    context.server.clone().ok_or_else(|| {
-        CliError::invalid_input(
-            "provide a server with --server, APOLLO_SERVER, or profile config",
-            output,
-        )
-    })
+    context
+        .server
+        .clone()
+        .filter(|server| !server.trim().is_empty())
+        .ok_or_else(|| {
+            CliError::invalid_input(
+                "provide a server with --server, APOLLO_SERVER, or profile config",
+                output,
+            )
+        })
 }
 
 fn required_operator(
@@ -598,7 +622,13 @@ fn required_operator(
 ) -> Result<String, CliError> {
     command_operator
         .map(ToOwned::to_owned)
-        .or_else(|| context.operator.clone())
+        .filter(|operator| !operator.trim().is_empty())
+        .or_else(|| {
+            context
+                .operator
+                .clone()
+                .filter(|operator| !operator.trim().is_empty())
+        })
         .ok_or_else(|| {
             CliError::invalid_input(
                 "provide an operator with --operator or profile config",
@@ -810,10 +840,7 @@ fn prompt_yes_no(label: &str, default: bool, output: OutputFormat) -> Result<boo
         io::stderr()
             .flush()
             .map_err(|error| CliError::invalid_input(&error.to_string(), output))?;
-        let mut line = String::new();
-        io::stdin()
-            .read_line(&mut line)
-            .map_err(|error| CliError::invalid_input(&error.to_string(), output))?;
+        let line = read_prompt_line(&mut io::stdin().lock(), output)?;
         let value = line.trim().to_ascii_lowercase();
         if value.is_empty() {
             return Ok(default);
@@ -840,16 +867,24 @@ fn prompt_line(
         .flush()
         .map_err(|error| CliError::invalid_input(&error.to_string(), output))?;
 
-    let mut line = String::new();
-    io::stdin()
-        .read_line(&mut line)
-        .map_err(|error| CliError::invalid_input(&error.to_string(), output))?;
+    let line = read_prompt_line(&mut io::stdin().lock(), output)?;
     let value = line.trim();
     if value.is_empty() {
         Ok(default.unwrap_or_default().to_owned())
     } else {
         Ok(value.to_owned())
     }
+}
+
+fn read_prompt_line<R: BufRead>(reader: &mut R, output: OutputFormat) -> Result<String, CliError> {
+    let mut line = String::new();
+    let bytes_read = reader
+        .read_line(&mut line)
+        .map_err(|error| CliError::invalid_input(&error.to_string(), output))?;
+    if bytes_read == 0 {
+        return Err(CliError::invalid_input("input aborted", output));
+    }
+    Ok(line)
 }
 
 #[derive(Serialize)]
@@ -914,7 +949,10 @@ impl ProfileSummaryRow {
         Self {
             active: active_profile.as_deref() == Some(name),
             name: name.to_owned(),
-            server: profile.server.clone().unwrap_or_default(),
+            server: profile
+                .server
+                .clone()
+                .unwrap_or_else(|| "<none>".to_owned()),
             output: profile.output.map(|output| output.to_string()),
             operator: profile.operator.clone(),
             credential: profile.credential.clone(),
@@ -999,6 +1037,7 @@ struct ProfileUseResponse {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ProfileSetupResponse {
     profile: String,
     active_profile: Option<String>,
@@ -1082,6 +1121,22 @@ impl AuthLoginResponse {
             "Credential stored for profile '{}'.\nBackend: {}\nKey: {}",
             self.profile, self.backend, self.key
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use crate::cli::OutputFormat;
+
+    #[test]
+    fn read_prompt_line_reports_eof_as_aborted_input() {
+        let mut reader = Cursor::new(Vec::<u8>::new());
+        let error =
+            super::read_prompt_line(&mut reader, OutputFormat::Json).expect_err("EOF should fail");
+
+        assert_eq!(error.exit_code(), 1);
     }
 }
 

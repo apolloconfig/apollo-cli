@@ -69,6 +69,34 @@ output = "table"
 }
 
 #[test]
+fn profile_show_ignores_blank_environment_overrides() {
+    let home = temp_home();
+    write_config(
+        &home,
+        r#"
+active_profile = "dev"
+
+[profiles.dev]
+server = "https://apollo-dev.example.com"
+output = "table"
+"#,
+    );
+
+    let assert = base_command(&home)
+        .env("APOLLO_PROFILE", "")
+        .env("APOLLO_SERVER", "   ")
+        .args(["--output", "json", "profile", "show"])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let json: Value = serde_json::from_str(&stdout).expect("json stdout");
+
+    assert_eq!(json["context"]["profile"], "dev");
+    assert_eq!(json["context"]["server"], "https://apollo-dev.example.com");
+}
+
+#[test]
 fn profile_show_uses_apollo_output_for_json_rendering() {
     let home = temp_home();
     write_config(
@@ -177,6 +205,32 @@ output = "json"
 }
 
 #[test]
+fn profile_list_recovers_when_active_profile_is_stale() {
+    let home = temp_home();
+    write_config(
+        &home,
+        r#"
+active_profile = "deleted"
+
+[profiles.dev]
+server = "https://apollo-dev.example.com"
+output = "table"
+"#,
+    );
+
+    let assert = base_command(&home)
+        .args(["--output", "json", "profile", "list"])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let json: Value = serde_json::from_str(&stdout).expect("json stdout");
+
+    assert_eq!(json["activeProfile"], "deleted");
+    assert_eq!(json["profiles"][0]["name"], "dev");
+}
+
+#[test]
 fn profile_use_updates_active_profile() {
     let home = temp_home();
     write_config(
@@ -204,6 +258,29 @@ output = "json"
 }
 
 #[test]
+fn profile_use_recovers_when_active_profile_is_stale() {
+    let home = temp_home();
+    write_config(
+        &home,
+        r#"
+active_profile = "deleted"
+
+[profiles.dev]
+server = "https://apollo-dev.example.com"
+output = "table"
+"#,
+    );
+
+    base_command(&home)
+        .args(["profile", "use", "dev"])
+        .assert()
+        .success();
+
+    let config = fs::read_to_string(config_path(&home)).expect("config file");
+    assert!(config.contains("active_profile = \"dev\""));
+}
+
+#[test]
 fn profile_use_returns_structured_error_for_unknown_profile() {
     let home = temp_home();
     write_config(
@@ -222,8 +299,9 @@ output = "table"
         .assert()
         .failure();
 
-    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
-    let json: Value = serde_json::from_str(&stdout).expect("json stdout");
+    assert!(assert.get_output().stdout.is_empty());
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf8 stderr");
+    let json: Value = serde_json::from_str(&stderr).expect("json stderr");
 
     assert_eq!(json["error"]["code"], "profile_not_found");
     assert_eq!(json["error"]["profile"], "prod");
@@ -249,7 +327,7 @@ fn init_creates_local_profile_and_file_credential_without_printing_token() {
     let json: Value = serde_json::from_str(&stdout).expect("json stdout");
 
     assert_eq!(json["profile"], "local");
-    assert_eq!(json["active_profile"], "local");
+    assert_eq!(json["activeProfile"], "local");
     assert_eq!(json["server"], "http://127.0.0.1:8070");
     assert_eq!(json["credential"]["backend"], "file");
     assert!(!stdout.contains("secret-from-stdin"));
@@ -263,6 +341,27 @@ fn init_creates_local_profile_and_file_credential_without_printing_token() {
     assert!(config.contains("backend = \"file\""));
     assert!(!config.contains("secret-from-stdin"));
     assert!(credential_file_path(&home, "local").exists());
+}
+
+#[test]
+fn init_with_apollo_output_json_does_not_persist_implicit_output() {
+    let home = temp_home();
+
+    let assert = base_command(&home)
+        .env("APOLLO_OUTPUT", "json")
+        .write_stdin("secret-from-stdin\n")
+        .args(["init", "--token-stdin", "--store-token-in-file"])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let json: Value = serde_json::from_str(&stdout).expect("json stdout");
+
+    assert_eq!(json["activeProfile"], "local");
+    assert_eq!(json["output"], "json");
+
+    let config = fs::read_to_string(config_path(&home)).expect("config file");
+    assert!(!config.contains("output = \"json\""));
 }
 
 #[test]
@@ -301,7 +400,7 @@ output = "json"
     let json: Value = serde_json::from_str(&stdout).expect("json stdout");
 
     assert_eq!(json["profile"], "dev");
-    assert_eq!(json["active_profile"], "local");
+    assert_eq!(json["activeProfile"], "local");
     assert_eq!(json["server"], "https://apollo-dev.example.com");
     assert_eq!(json["operator"], "dev-operator");
     assert_eq!(json["credential"]["backend"], "file");
@@ -349,6 +448,46 @@ output = "json"
 }
 
 #[test]
+fn profile_add_overwrite_preserves_existing_credential_without_new_token() {
+    let home = temp_home();
+    write_config(
+        &home,
+        r#"
+active_profile = "dev"
+
+[profiles.dev]
+server = "https://apollo-old.example.com"
+output = "table"
+
+[profiles.dev.credential]
+backend = "file"
+key = "dev"
+"#,
+    );
+    fs::create_dir_all(credential_file_path(&home, "dev").parent().expect("parent"))
+        .expect("credential dir");
+    fs::write(credential_file_path(&home, "dev"), "secret-from-file\n").expect("credential file");
+
+    base_command(&home)
+        .args([
+            "--server",
+            "https://apollo-new.example.com",
+            "profile",
+            "add",
+            "dev",
+            "--overwrite",
+        ])
+        .assert()
+        .success();
+
+    let config = fs::read_to_string(config_path(&home)).expect("config file");
+    assert!(config.contains("server = \"https://apollo-new.example.com\""));
+    assert!(config.contains("backend = \"file\""));
+    assert!(config.contains("key = \"dev\""));
+    assert!(credential_file_path(&home, "dev").exists());
+}
+
+#[test]
 fn profile_add_refuses_existing_profile_without_overwrite() {
     let home = temp_home();
     write_config(
@@ -374,7 +513,7 @@ output = "json"
         ])
         .assert()
         .failure()
-        .stdout(predicate::str::contains("profile_already_exists"));
+        .stderr(predicate::str::contains("profile_already_exists"));
 }
 
 fn base_command(home: &TempDir) -> Command {

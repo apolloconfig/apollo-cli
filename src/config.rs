@@ -108,16 +108,17 @@ pub fn resolve_context(
             .global
             .server
             .clone()
-            .or_else(|| env::var("APOLLO_SERVER").ok())
+            .and_then(non_blank)
+            .or_else(|| env_var_non_blank("APOLLO_SERVER"))
             .or_else(|| {
                 profile_config
                     .as_ref()
-                    .and_then(|profile| profile.server.clone())
+                    .and_then(|profile| profile.server.clone().and_then(non_blank))
             }),
         output,
         operator: profile_config
             .as_ref()
-            .and_then(|profile| profile.operator.clone()),
+            .and_then(|profile| profile.operator.clone().and_then(non_blank)),
         credential: profile_config.and_then(|profile| profile.credential),
     })
 }
@@ -161,7 +162,11 @@ fn config_path_for_platform(
             .join("apollo")
             .join("config.toml")),
         Platform::Linux => {
-            if let Some(xdg_config_home) = vars.get("XDG_CONFIG_HOME").cloned() {
+            if let Some(xdg_config_home) = vars
+                .get("XDG_CONFIG_HOME")
+                .filter(|value| !value.is_empty())
+                .cloned()
+            {
                 Ok(PathBuf::from(xdg_config_home)
                     .join("apollo")
                     .join("config.toml"))
@@ -184,7 +189,7 @@ fn collect_env_vars() -> HashMap<String, OsString> {
         .collect()
 }
 
-fn read_env_output() -> Option<OutputFormat> {
+pub(crate) fn read_env_output() -> Option<OutputFormat> {
     env::var("APOLLO_OUTPUT")
         .ok()
         .and_then(|value| OutputFormat::parse(&value))
@@ -199,8 +204,9 @@ fn selected_profile_and_config(
         .global
         .profile
         .clone()
-        .or_else(|| env::var("APOLLO_PROFILE").ok())
-        .or_else(|| loaded.config.active_profile.clone());
+        .and_then(non_blank)
+        .or_else(|| env_var_non_blank("APOLLO_PROFILE"))
+        .or_else(|| loaded.config.active_profile.clone().and_then(non_blank));
 
     let profile_config = match &selected_profile {
         Some(profile_name) => Some(
@@ -217,9 +223,17 @@ fn selected_profile_and_config(
     Ok((selected_profile, profile_config))
 }
 
+fn env_var_non_blank(name: &str) -> Option<String> {
+    env::var(name).ok().and_then(non_blank)
+}
+
+fn non_blank(value: String) -> Option<String> {
+    (!value.trim().is_empty()).then_some(value)
+}
+
 impl OutputFormat {
     pub fn parse(value: &str) -> Option<Self> {
-        match value.to_ascii_lowercase().as_str() {
+        match value.trim().to_ascii_lowercase().as_str() {
             "json" => Some(Self::Json),
             "table" => Some(Self::Table),
             _ => None,
@@ -266,6 +280,19 @@ mod tests {
         )]);
         let path = config_path_for_platform(Platform::Linux, &vars).expect("linux xdg path");
         assert_eq!(path, PathBuf::from("/tmp/config-home/apollo/config.toml"));
+    }
+
+    #[test]
+    fn config_path_treats_empty_linux_xdg_as_unset() {
+        let vars = HashMap::from([
+            (String::from("HOME"), OsString::from("/home/tester")),
+            (String::from("XDG_CONFIG_HOME"), OsString::from("")),
+        ]);
+        let path = config_path_for_platform(Platform::Linux, &vars).expect("linux xdg path");
+        assert_eq!(
+            path,
+            PathBuf::from("/home/tester/.config/apollo/config.toml")
+        );
     }
 
     #[test]

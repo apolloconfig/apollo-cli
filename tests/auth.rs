@@ -57,11 +57,12 @@ server = "https://apollo-dev.example.com"
         .assert()
         .failure();
 
-    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
-    let json: Value = serde_json::from_str(&stdout).expect("json stdout");
+    assert!(assert.get_output().stdout.is_empty());
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf8 stderr");
+    let json: Value = serde_json::from_str(&stderr).expect("json stderr");
 
     assert_eq!(json["error"]["code"], "confirmation_required");
-    assert!(!stdout.contains("secret-from-stdin"));
+    assert!(!stderr.contains("secret-from-stdin"));
     assert!(!credential_file_path(&home, "dev").exists());
 }
 
@@ -146,6 +147,41 @@ key = "dev"
     assert_eq!(json["authenticated"], true);
     assert_eq!(json["source"], "file");
     assert!(!stdout.contains("secret-from-file"));
+}
+
+#[test]
+fn auth_login_rejects_file_credential_keys_with_path_separators() {
+    let home = temp_home();
+    write_config(
+        &home,
+        r#"
+active_profile = "../dev"
+
+[profiles."../dev"]
+server = "https://apollo-dev.example.com"
+"#,
+    );
+
+    let assert = base_command(&home)
+        .write_stdin("secret-from-stdin\n")
+        .args([
+            "--output",
+            "json",
+            "auth",
+            "login",
+            "--token-stdin",
+            "--store-token-in-file",
+        ])
+        .assert()
+        .failure();
+
+    assert!(assert.get_output().stdout.is_empty());
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf8 stderr");
+    let json: Value = serde_json::from_str(&stderr).expect("json stderr");
+
+    assert_eq!(json["error"]["code"], "credential_store_unavailable");
+    assert!(!stderr.contains("secret-from-stdin"));
+    assert!(!config_root(&home).join("dev.token").exists());
 }
 
 #[test]

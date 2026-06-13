@@ -1,9 +1,13 @@
 use serde::Serialize;
 use serde_json::Value;
+use std::time::Duration;
 
 use crate::cli::OutputFormat;
 use crate::error::CliError;
-use crate::redaction::Sensitive;
+use crate::redaction::{Redactor, Sensitive};
+
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_ERROR_BODY_CHARS: usize = 4096;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct OpenApiResponse {
@@ -54,6 +58,7 @@ impl OpenApiClient {
         }
 
         let response = request
+            .timeout(REQUEST_TIMEOUT)
             .send()
             .map_err(|error| CliError::network(&path, &error.to_string(), self.format))?;
         let status = response.status();
@@ -62,6 +67,7 @@ impl OpenApiClient {
             .map_err(|error| CliError::network(&path, &error.to_string(), self.format))?;
 
         if !status.is_success() {
+            let body = sanitize_error_body(&body);
             return Err(CliError::http_status(
                 status.as_u16(),
                 &path,
@@ -80,6 +86,25 @@ impl OpenApiClient {
             status: status.as_u16(),
             data,
         })
+    }
+}
+
+fn sanitize_error_body(body: &str) -> String {
+    let redactor = Redactor;
+    let redacted = serde_json::from_str::<Value>(body)
+        .ok()
+        .map(|value| redactor.redact_json(value).to_string())
+        .unwrap_or_else(|| redactor.redact_text(body));
+    truncate_chars(redacted, MAX_ERROR_BODY_CHARS)
+}
+
+fn truncate_chars(value: String, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let truncated: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{}...", truncated)
+    } else {
+        truncated
     }
 }
 

@@ -4,6 +4,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
+use std::time::Duration;
 
 use assert_cmd::Command;
 use predicates::prelude::predicate;
@@ -151,9 +152,35 @@ fn mutating_commands_require_yes_before_network_call() {
         .assert()
         .failure();
 
-    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
-    let json: Value = serde_json::from_str(&stdout).expect("json stdout");
+    assert!(assert.get_output().stdout.is_empty());
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf8 stderr");
+    let json: Value = serde_json::from_str(&stderr).expect("json stderr");
     assert_eq!(json["error"]["code"], "confirmation_required");
+}
+
+#[test]
+fn openapi_error_redacts_sensitive_response_body_to_stderr() {
+    let server = TestServer::new(
+        500,
+        "application/json",
+        r#"{"authorization":"consumer-token","message":"failed with consumer token consumer-token"}"#,
+    );
+    let home = temp_home();
+    write_config(&home, &profile_config(&server.url()));
+
+    let assert = base_command(&home)
+        .env("APOLLO_TOKEN", "consumer-token")
+        .args(["--output", "json", "app", "list"])
+        .assert()
+        .failure();
+
+    assert!(assert.get_output().stdout.is_empty());
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf8 stderr");
+    let json: Value = serde_json::from_str(&stderr).expect("json stderr");
+
+    assert_eq!(json["error"]["code"], "server_error");
+    assert!(!stderr.contains("consumer-token"));
+    assert!(stderr.contains("[REDACTED]"));
 }
 
 #[test]
@@ -351,12 +378,18 @@ impl TestServer {
     }
 
     fn request(self) -> CapturedRequest {
-        self.request_rx.recv().expect("captured request")
+        self.request_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("timed out waiting for captured request")
     }
 
     fn requests(self, count: usize) -> Vec<CapturedRequest> {
         (0..count)
-            .map(|_| self.request_rx.recv().expect("captured request"))
+            .map(|_| {
+                self.request_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("timed out waiting for captured request")
+            })
             .collect()
     }
 }

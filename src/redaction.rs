@@ -1,23 +1,31 @@
 use std::fmt;
+use std::sync::LazyLock;
 
 use regex::Regex;
 use serde_json::{Map, Value};
 
 const REDACTED: &str = "[REDACTED]";
 
+static AUTHORIZATION_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new("(?i)(authorization\\s*:\\s*(?:bearer\\s+)?)[^\\s]+").unwrap());
+static CONSUMER_TOKEN_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new("(?i)(consumer\\s+token\\s+)[^\\s]+").unwrap());
+static JSON_SENSITIVE_FIELD_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new("(?i)(\"[^\"]*(?:authorization|token|password|secret)[^\"]*\"\\s*:\\s*\")[^\"]*(\")")
+        .unwrap()
+});
+
 #[derive(Default)]
 pub struct Redactor;
 
 impl Redactor {
     pub fn redact_text(&self, value: &str) -> String {
-        let authorization = Regex::new("(?i)(authorization\\s*:\\s*bearer\\s+)[^\\s]+")
-            .expect("authorization regex");
-        let consumer_token =
-            Regex::new("(?i)(consumer\\s+token\\s+)[^\\s]+").expect("consumer token regex");
-
-        let value = authorization.replace_all(value, format!("${{1}}{}", REDACTED));
-        consumer_token
+        let value = AUTHORIZATION_RE.replace_all(value, format!("${{1}}{}", REDACTED));
+        let value = CONSUMER_TOKEN_RE
             .replace_all(&value, format!("${{1}}{}", REDACTED))
+            .to_string();
+        JSON_SENSITIVE_FIELD_RE
+            .replace_all(&value, format!("${{1}}{}${{2}}", REDACTED))
             .to_string()
     }
 

@@ -39,6 +39,7 @@ pub enum CliErrorKind {
     },
     ProfileAlreadyExists {
         profile: String,
+        command: String,
     },
 }
 
@@ -84,10 +85,11 @@ impl CliError {
         }
     }
 
-    pub fn profile_already_exists(profile: &str, format: OutputFormat) -> Self {
+    pub fn profile_already_exists(profile: &str, command: &str, format: OutputFormat) -> Self {
         Self {
             kind: CliErrorKind::ProfileAlreadyExists {
                 profile: profile.to_owned(),
+                command: command.to_owned(),
             },
             format,
         }
@@ -280,19 +282,20 @@ impl CliError {
                     path: None,
                     profile: Some(profile.clone()),
                 }),
-            CliErrorKind::ProfileAlreadyExists { profile } => OutputWriter::new(self.format)
-                .render_error(&StructuredError {
+            CliErrorKind::ProfileAlreadyExists { profile, command } => {
+                OutputWriter::new(self.format).render_error(&StructuredError {
                     code: "profile_already_exists",
                     category: "invalid_input",
                     message: format!(
                         "Profile '{}' already exists. Re-run with --overwrite to replace it.",
                         profile
                     ),
-                    command: Some("profile add".to_owned()),
+                    command: Some(command.clone()),
                     follow_up_issue: None,
                     path: None,
                     profile: Some(profile.clone()),
-                }),
+                })
+            }
         }
     }
 }

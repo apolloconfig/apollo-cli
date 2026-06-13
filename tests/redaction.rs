@@ -10,8 +10,16 @@ fn redacts_token_like_text_and_authorization_headers() {
         "Authorization: Bearer [REDACTED]"
     );
     assert_eq!(
+        redactor.redact_text("Authorization: secret-token"),
+        "Authorization: [REDACTED]"
+    );
+    assert_eq!(
         redactor.redact_text("consumer token secret-token"),
         "consumer token [REDACTED]"
+    );
+    assert_eq!(
+        redactor.redact_text(r#"{"token":"secret-token","message":"visible"}"#),
+        r#"{"token":"[REDACTED]","message":"visible"}"#
     );
 }
 
