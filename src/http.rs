@@ -76,6 +76,7 @@ impl OpenApiClient {
             ));
         }
 
+        let body = redact_exact_token(body, self.token.expose_secret());
         let data = if body.trim().is_empty() {
             Value::Null
         } else {

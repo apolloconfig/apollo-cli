@@ -47,6 +47,30 @@ fn api_get_calls_openapi_with_consumer_token() {
 }
 
 #[test]
+fn openapi_env_auth_with_explicit_server_ignores_stale_active_profile() {
+    let server = TestServer::json(r#"[{"appId":"demo"}]"#);
+    let home = temp_home();
+    write_config(
+        &home,
+        r#"
+active_profile = "missing"
+"#,
+    );
+
+    let assert = base_command(&home)
+        .env("APOLLO_TOKEN", "consumer-token")
+        .args(["--server", &server.url(), "--output", "json", "app", "list"])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let json: Value = serde_json::from_str(&stdout).expect("json stdout");
+
+    assert_eq!(json["data"][0]["appId"], "demo");
+    assert_eq!(server.request().path, "/openapi/v1/apps");
+}
+
+#[test]
 fn app_and_env_commands_call_openapi_endpoints() {
     let app_server = TestServer::json(r#"[{"appId":"demo"}]"#);
     let home = temp_home();
@@ -217,6 +241,32 @@ fn openapi_error_redacts_sensitive_response_body_to_stderr() {
 }
 
 #[test]
+fn openapi_success_redacts_exact_token_from_response_body() {
+    let server = TestServer::json(r#"{"message":"consumer-token"}"#);
+    let home = temp_home();
+
+    let assert = base_command(&home)
+        .env("APOLLO_TOKEN", "consumer-token")
+        .args([
+            "--server",
+            &server.url(),
+            "--output",
+            "json",
+            "api",
+            "get",
+            "/openapi/v1/apps",
+        ])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let json: Value = serde_json::from_str(&stdout).expect("json stdout");
+
+    assert_eq!(json["data"]["message"], "[REDACTED]");
+    assert!(!stdout.contains("consumer-token"));
+}
+
+#[test]
 fn config_set_with_yes_sends_update_payload() {
     let server = TestServer::empty();
     let home = temp_home();
@@ -245,6 +295,41 @@ fn config_set_with_yes_sends_update_payload() {
     assert_eq!(body["value"], "3000");
     assert_eq!(body["dataChangeLastModifiedBy"], "apollo-bot");
     assert_eq!(body["dataChangeCreatedBy"], "apollo-bot");
+    assert!(body.get("comment").is_none());
+}
+
+#[test]
+fn config_set_with_yes_sends_comment_when_provided() {
+    let server = TestServer::empty();
+    let home = temp_home();
+    write_config(
+        &home,
+        &profile_config_with_operator(&server.url(), "apollo-bot"),
+    );
+
+    base_command(&home)
+        .env("APOLLO_TOKEN", "consumer-token")
+        .args([
+            "--yes",
+            "--output",
+            "json",
+            "config",
+            "set",
+            "--env",
+            "DEV",
+            "--app",
+            "demo",
+            "--comment",
+            "update timeout",
+            "timeout",
+            "3000",
+        ])
+        .assert()
+        .success();
+
+    let request = server.request();
+    let body: Value = serde_json::from_str(&request.body).expect("json body");
+    assert_eq!(body["comment"], "update timeout");
 }
 
 #[test]
@@ -422,6 +507,43 @@ fn config_apply_with_yes_uses_synchronize_endpoint() {
     assert_eq!(body["syncToNamespaces"][0]["env"], "FAT");
     assert_eq!(body["syncToNamespaces"][0]["clusterName"], "default");
     assert_eq!(body["syncToNamespaces"][0]["namespaceName"], "application");
+    assert_eq!(body["syncItems"], Value::Array(vec![]));
+}
+
+#[test]
+fn config_diff_sends_empty_sync_items() {
+    let server = TestServer::empty();
+    let home = temp_home();
+    write_config(
+        &home,
+        &profile_config_with_operator(&server.url(), "apollo-bot"),
+    );
+
+    base_command(&home)
+        .env("APOLLO_TOKEN", "consumer-token")
+        .args([
+            "--output",
+            "json",
+            "config",
+            "diff",
+            "--env",
+            "DEV",
+            "--app",
+            "demo",
+            "--target-env",
+            "FAT",
+        ])
+        .assert()
+        .success();
+
+    let request = server.request();
+    assert_eq!(request.method, "POST");
+    assert_eq!(
+        request.path,
+        "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/application/items/diff"
+    );
+    let body: Value = serde_json::from_str(&request.body).expect("json body");
+    assert_eq!(body["syncItems"], Value::Array(vec![]));
 }
 
 #[derive(Debug)]

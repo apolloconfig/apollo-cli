@@ -72,15 +72,13 @@ fn execute_auth(
     output: OutputFormat,
 ) -> Result<RenderedOutput, CliError> {
     let loaded = load_config(output)?;
-    let writer_output = resolve_output(cli, &loaded, output)?;
-    let writer = OutputWriter::new(writer_output);
 
     match command {
         AuthCommand::Status => {
-            if std::env::var("APOLLO_TOKEN")
-                .ok()
-                .is_some_and(|token| !token.trim().is_empty())
-            {
+            if env_token_is_set() {
+                let writer_output = resolve_output(cli, &loaded, output)
+                    .unwrap_or_else(|_| output_from_flags_or_env(cli).unwrap_or(output));
+                let writer = OutputWriter::new(writer_output);
                 let profile = cli
                     .global
                     .profile
@@ -98,6 +96,8 @@ fn execute_auth(
                 return Ok(writer.render_success(&response, response.render_table()));
             }
 
+            let writer_output = resolve_output(cli, &loaded, output)?;
+            let writer = OutputWriter::new(writer_output);
             let context = resolve_context(cli, &loaded, output)?;
             let profile = required_profile(&context, writer_output)?;
             let status = credential::status(&loaded.path, &profile, context.credential.as_ref());
@@ -114,6 +114,8 @@ fn execute_auth(
             token_stdin,
             store_token_in_file,
         } => {
+            let writer_output = resolve_output(cli, &loaded, output)?;
+            let writer = OutputWriter::new(writer_output);
             let context = resolve_context(cli, &loaded, output)?;
             let profile = required_profile(&context, writer_output)?;
             if !loaded.config.profiles.contains_key(&profile) {
@@ -147,6 +149,8 @@ fn execute_auth(
             Ok(writer.render_success(&response, response.render_table()))
         }
         AuthCommand::Logout => {
+            let writer_output = resolve_output(cli, &loaded, output)?;
+            let writer = OutputWriter::new(writer_output);
             let context = resolve_context(cli, &loaded, output)?;
             let profile = required_profile(&context, output)?;
             let environment_token_still_active = std::env::var("APOLLO_TOKEN")
@@ -458,10 +462,13 @@ fn execute_config(
             let body = json!({
                 "key": key,
                 "value": value,
-                "comment": comment.unwrap_or_default(),
                 "dataChangeCreatedBy": operator,
                 "dataChangeLastModifiedBy": operator,
             });
+            let mut body = body;
+            if let Some(comment) = comment {
+                body["comment"] = json!(comment);
+            }
             match openapi
                 .client
                 .request("PUT", &update_path, Some(body.clone()))
@@ -623,6 +630,10 @@ impl OpenApiCommandContext {
 
 fn openapi_context(cli: &Cli, output: OutputFormat) -> Result<OpenApiCommandContext, CliError> {
     let loaded = load_config(output)?;
+    if let Some(context) = env_openapi_context(cli, &loaded, output)? {
+        return Ok(context);
+    }
+
     let writer_output = resolve_output(cli, &loaded, output)?;
     let context = resolve_context(cli, &loaded, writer_output)?;
     let server = required_server(&context, writer_output)?;
@@ -643,6 +654,55 @@ fn openapi_context(cli: &Cli, output: OutputFormat) -> Result<OpenApiCommandCont
         writer: OutputWriter::new(writer_output),
         client: OpenApiClient::new(server, token, writer_output),
     })
+}
+
+fn env_openapi_context(
+    cli: &Cli,
+    loaded: &LoadedConfig,
+    output: OutputFormat,
+) -> Result<Option<OpenApiCommandContext>, CliError> {
+    if !env_token_is_set() {
+        return Ok(None);
+    }
+    let Some(server) = explicit_server(cli) else {
+        return Ok(None);
+    };
+
+    let writer_output = resolve_output(cli, loaded, output)
+        .unwrap_or_else(|_| output_from_flags_or_env(cli).unwrap_or(output));
+    let token = credential::resolve_token(&loaded.path, None, None)
+        .map_err(|error| CliError::credential_store_unavailable(&error, writer_output))?
+        .ok_or_else(|| {
+            CliError::authentication_required(
+                "Authenticate with APOLLO_TOKEN or `apollo auth login` before calling OpenAPI.",
+                writer_output,
+            )
+        })?;
+    let selected_profile = cli
+        .global
+        .profile
+        .clone()
+        .and_then(non_blank)
+        .or_else(|| std::env::var("APOLLO_PROFILE").ok().and_then(non_blank))
+        .or_else(|| loaded.config.active_profile.clone().and_then(non_blank));
+    let operator = selected_profile
+        .as_ref()
+        .and_then(|profile| loaded.config.profiles.get(profile))
+        .and_then(|profile| profile.operator.clone().and_then(non_blank));
+
+    let context = RuntimeContext {
+        profile: selected_profile,
+        server: Some(server.clone()),
+        output: writer_output,
+        operator,
+        credential: None,
+    };
+
+    Ok(Some(OpenApiCommandContext {
+        context,
+        writer: OutputWriter::new(writer_output),
+        client: OpenApiClient::new(server, token, writer_output),
+    }))
 }
 
 fn render_openapi_response(writer: &OutputWriter, response: &OpenApiResponse) -> RenderedOutput {
@@ -686,6 +746,20 @@ fn output_for_confirmation(cli: &Cli, output: OutputFormat) -> OutputFormat {
         .ok()
         .and_then(|loaded| resolve_output(cli, &loaded, output).ok())
         .unwrap_or(output)
+}
+
+fn explicit_server(cli: &Cli) -> Option<String> {
+    cli.global
+        .server
+        .clone()
+        .and_then(non_blank)
+        .or_else(|| std::env::var("APOLLO_SERVER").ok().and_then(non_blank))
+}
+
+fn env_token_is_set() -> bool {
+    std::env::var("APOLLO_TOKEN")
+        .ok()
+        .is_some_and(|token| !token.trim().is_empty())
 }
 
 fn required_server(context: &RuntimeContext, output: OutputFormat) -> Result<String, CliError> {
@@ -784,6 +858,7 @@ fn sync_body(
             "clusterName": target_cluster,
             "namespaceName": target_namespace.unwrap_or_else(|| scope.namespace.clone()),
         }],
+        "syncItems": [],
     })
 }
 
