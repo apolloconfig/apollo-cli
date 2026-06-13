@@ -120,8 +120,8 @@ impl CredentialStore for FileCredentialStore {
     }
 
     fn set(&self, key: &str, token: &Sensitive) -> Result<(), String> {
-        fs::create_dir_all(&self.base_dir).map_err(|error| error.to_string())?;
         let path = self.path_for_key(key)?;
+        fs::create_dir_all(&self.base_dir).map_err(|error| error.to_string())?;
         write_token_file(&path, token.expose_secret())?;
         Ok(())
     }

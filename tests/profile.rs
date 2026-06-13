@@ -358,9 +358,48 @@ fn init_with_apollo_output_json_does_not_persist_implicit_output() {
     let json: Value = serde_json::from_str(&stdout).expect("json stdout");
 
     assert_eq!(json["activeProfile"], "local");
-    assert_eq!(json["output"], "json");
+    assert_eq!(json["output"], "table");
 
     let config = fs::read_to_string(config_path(&home)).expect("config file");
+    assert!(!config.contains("output = \"json\""));
+}
+
+#[test]
+fn init_ignores_blank_setup_values_and_uses_defaults() {
+    let home = temp_home();
+
+    let assert = base_command(&home)
+        .env("APOLLO_OUTPUT", "json")
+        .write_stdin("secret-from-stdin\n")
+        .args([
+            "--profile",
+            "",
+            "--server",
+            "",
+            "init",
+            "--name",
+            "",
+            "--operator",
+            "",
+            "--token-stdin",
+            "--store-token-in-file",
+        ])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let json: Value = serde_json::from_str(&stdout).expect("json stdout");
+
+    assert_eq!(json["profile"], "local");
+    assert_eq!(json["server"], "http://127.0.0.1:8070");
+    assert_eq!(json["operator"], "apollo");
+    assert_eq!(json["output"], "table");
+
+    let config = fs::read_to_string(config_path(&home)).expect("config file");
+    assert!(config.contains("[profiles.local]"));
+    assert!(config.contains("server = \"http://127.0.0.1:8070\""));
+    assert!(config.contains("operator = \"apollo\""));
+    assert!(!config.contains("[profiles.\"\"]"));
     assert!(!config.contains("output = \"json\""));
 }
 
@@ -514,6 +553,46 @@ output = "json"
         .assert()
         .failure()
         .stderr(predicate::str::contains("profile_already_exists"));
+}
+
+#[test]
+fn profile_add_rejects_blank_profile_name_non_interactively() {
+    let home = temp_home();
+
+    let assert = base_command(&home)
+        .args([
+            "--output",
+            "json",
+            "--server",
+            "https://apollo-dev.example.com",
+            "profile",
+            "add",
+            "",
+        ])
+        .assert()
+        .failure();
+
+    assert!(assert.get_output().stdout.is_empty());
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf8 stderr");
+    let json: Value = serde_json::from_str(&stderr).expect("json stderr");
+    assert_eq!(json["error"]["code"], "invalid_input");
+    assert!(stderr.contains("provide a profile name"));
+}
+
+#[test]
+fn profile_add_rejects_blank_server_non_interactively() {
+    let home = temp_home();
+
+    let assert = base_command(&home)
+        .args(["--output", "json", "--server", "", "profile", "add", "dev"])
+        .assert()
+        .failure();
+
+    assert!(assert.get_output().stdout.is_empty());
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf8 stderr");
+    let json: Value = serde_json::from_str(&stderr).expect("json stderr");
+    assert_eq!(json["error"]["code"], "invalid_input");
+    assert!(stderr.contains("provide a server"));
 }
 
 fn base_command(home: &TempDir) -> Command {

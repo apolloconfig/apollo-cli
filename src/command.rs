@@ -43,6 +43,14 @@ fn output_from_flags_or_env(cli: &Cli) -> Option<OutputFormat> {
     cli.global.output.or_else(read_env_output)
 }
 
+fn non_blank(value: String) -> Option<String> {
+    if value.trim().is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
 fn execute_init(
     args: InitArgs,
     cli: &Cli,
@@ -252,13 +260,14 @@ fn execute_profile_setup(
     }
 
     let server = resolve_setup_server(&options, cli, interactive, writer_output)?;
-    let profile_output = cli.global.output.unwrap_or(OutputFormat::Json);
+    let profile_output = cli.global.output;
+    let response_output = profile_output.unwrap_or(OutputFormat::Table);
     let operator = resolve_setup_operator(&options, interactive, writer_output)?;
     let existing_profile = loaded.config.profiles.get(&profile_name);
 
     let mut profile_config = ProfileConfig {
         server: Some(server.clone()),
-        output: cli.global.output,
+        output: profile_output,
         operator: operator.clone(),
         credential: existing_profile.and_then(|profile| profile.credential.clone()),
     };
@@ -291,7 +300,7 @@ fn execute_profile_setup(
         profile: profile_name,
         active_profile: config.active_profile.clone(),
         server,
-        output: profile_output.to_string(),
+        output: response_output.to_string(),
         operator,
         credential,
         config_path: loaded.path.display().to_string(),
@@ -694,7 +703,8 @@ fn resolve_setup_profile_name(
     options
         .name
         .clone()
-        .or_else(|| cli.global.profile.clone())
+        .and_then(non_blank)
+        .or_else(|| cli.global.profile.clone().and_then(non_blank))
         .or_else(|| match options.mode {
             ProfileSetupMode::Init => Some(DEFAULT_INIT_PROFILE.to_owned()),
             ProfileSetupMode::Add => None,
@@ -721,6 +731,7 @@ fn resolve_setup_server(
     cli.global
         .server
         .clone()
+        .and_then(non_blank)
         .or_else(|| match options.mode {
             ProfileSetupMode::Init => Some(DEFAULT_INIT_SERVER.to_owned()),
             ProfileSetupMode::Add => None,
@@ -743,8 +754,8 @@ fn resolve_setup_operator(
     interactive: bool,
     output: OutputFormat,
 ) -> Result<Option<String>, CliError> {
-    if let Some(operator) = &options.operator {
-        return Ok(Some(operator.clone()));
+    if let Some(operator) = options.operator.clone().and_then(non_blank) {
+        return Ok(Some(operator));
     }
     if matches!(options.mode, ProfileSetupMode::Init) {
         return Ok(Some(DEFAULT_INIT_OPERATOR.to_owned()));

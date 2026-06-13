@@ -181,7 +181,12 @@ server = "https://apollo-dev.example.com"
 
     assert_eq!(json["error"]["code"], "credential_store_unavailable");
     assert!(!stderr.contains("secret-from-stdin"));
-    assert!(!config_root(&home).join("dev.token").exists());
+    assert!(
+        !config_root(&home)
+            .join("apollo")
+            .join("credentials")
+            .exists()
+    );
 }
 
 #[test]

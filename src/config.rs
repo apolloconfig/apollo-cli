@@ -150,6 +150,7 @@ fn config_path_for_platform(
 ) -> Result<PathBuf, String> {
     let home = || {
         vars.get("HOME")
+            .filter(|value| !value.is_empty())
             .cloned()
             .map(PathBuf::from)
             .ok_or_else(|| "HOME is not set".to_owned())
@@ -293,6 +294,20 @@ mod tests {
             path,
             PathBuf::from("/home/tester/.config/apollo/config.toml")
         );
+    }
+
+    #[test]
+    fn config_path_treats_empty_home_as_unset() {
+        let vars = HashMap::from([(String::from("HOME"), OsString::from(""))]);
+        let error = config_path_for_platform(Platform::MacOs, &vars).expect_err("missing home");
+        assert_eq!(error, "HOME is not set");
+
+        let vars = HashMap::from([
+            (String::from("HOME"), OsString::from("")),
+            (String::from("XDG_CONFIG_HOME"), OsString::from("")),
+        ]);
+        let error = config_path_for_platform(Platform::Linux, &vars).expect_err("missing home");
+        assert_eq!(error, "HOME is not set");
     }
 
     #[test]
