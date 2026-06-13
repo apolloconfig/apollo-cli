@@ -71,6 +71,34 @@ active_profile = "missing"
 }
 
 #[test]
+fn openapi_env_auth_with_explicit_server_does_not_require_config_home() {
+    let server = TestServer::json(r#"[{"appId":"demo"}]"#);
+    let home = temp_home();
+
+    let assert = base_command(&home)
+        .env("APOLLO_TOKEN", "consumer-token")
+        .env_remove("HOME")
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("APPDATA")
+        .args([
+            "--server",
+            &server.url(),
+            "--output",
+            "json",
+            "api",
+            "get",
+            "/openapi/v1/apps",
+        ])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let json: Value = serde_json::from_str(&stdout).expect("json stdout");
+    assert_eq!(json["data"][0]["appId"], "demo");
+    assert_eq!(server.request().path, "/openapi/v1/apps");
+}
+
+#[test]
 fn app_and_env_commands_call_openapi_endpoints() {
     let app_server = TestServer::json(r#"[{"appId":"demo"}]"#);
     let home = temp_home();
@@ -242,7 +270,7 @@ fn openapi_error_redacts_sensitive_response_body_to_stderr() {
 
 #[test]
 fn openapi_success_redacts_exact_token_from_response_body() {
-    let server = TestServer::json(r#"{"message":"consumer-token"}"#);
+    let server = TestServer::json(r#"{"message":"consumer-token","consumer-token":"value"}"#);
     let home = temp_home();
 
     let assert = base_command(&home)
@@ -263,6 +291,7 @@ fn openapi_success_redacts_exact_token_from_response_body() {
     let json: Value = serde_json::from_str(&stdout).expect("json stdout");
 
     assert_eq!(json["data"]["message"], "[REDACTED]");
+    assert_eq!(json["data"]["[REDACTED]"], "value");
     assert!(!stdout.contains("consumer-token"));
 }
 
@@ -572,6 +601,42 @@ fn config_apply_with_yes_uses_synchronize_endpoint() {
     assert_eq!(body["syncToNamespaces"][0]["namespaceName"], "application");
     assert_eq!(body["syncItems"][0]["key"], "timeout");
     assert_eq!(body["syncItems"][0]["value"], "3000");
+}
+
+#[test]
+fn config_apply_rejects_cross_namespace_target_before_syncing() {
+    let server = TestServer::empty();
+    let home = temp_home();
+    write_config(
+        &home,
+        &profile_config_with_operator(&server.url(), "apollo-bot"),
+    );
+
+    let assert = base_command(&home)
+        .env("APOLLO_TOKEN", "consumer-token")
+        .args([
+            "--yes",
+            "--output",
+            "json",
+            "config",
+            "apply",
+            "--env",
+            "DEV",
+            "--app",
+            "demo",
+            "--target-env",
+            "FAT",
+            "--target-namespace",
+            "other",
+        ])
+        .assert()
+        .failure();
+
+    assert!(assert.get_output().stdout.is_empty());
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf8 stderr");
+    let json: Value = serde_json::from_str(&stderr).expect("json stderr");
+    assert_eq!(json["error"]["code"], "invalid_input");
+    assert!(stderr.contains("--target-namespace"));
 }
 
 #[test]

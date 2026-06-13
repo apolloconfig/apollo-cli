@@ -325,6 +325,10 @@ fn execute_profile_setup(
         config.active_profile = Some(profile_name.clone());
     }
     save_config(&loaded.path, &config, writer_output)?;
+    let response_credential = config
+        .profiles
+        .get(&profile_name)
+        .and_then(|profile| profile.credential.clone());
 
     let response = ProfileSetupResponse {
         profile: profile_name,
@@ -332,7 +336,7 @@ fn execute_profile_setup(
         server,
         output: response_output.to_string(),
         operator,
-        credential,
+        credential: response_credential,
         config_path: loaded.path.display().to_string(),
         next_steps: vec![
             "apollo profile show".to_owned(),
@@ -544,6 +548,14 @@ fn execute_config(
                 &openapi.context,
                 openapi.context.output,
             )?;
+            if let Some(namespace) = &target_namespace
+                && namespace != &scope.namespace
+            {
+                return Err(CliError::invalid_input(
+                    "config apply does not support --target-namespace different from the source namespace because Apollo synchronize requires matching namespace names",
+                    openapi.context.output,
+                ));
+            }
             let sync_items = source_sync_items(&openapi, &scope)?;
             let body = sync_body(
                 &scope,
@@ -660,6 +672,15 @@ impl OpenApiCommandContext {
 }
 
 fn openapi_context(cli: &Cli, output: OutputFormat) -> Result<OpenApiCommandContext, CliError> {
+    if env_token_is_set() && explicit_server(cli).is_some() {
+        if let Ok(loaded) = load_config(output)
+            && let Some(context) = env_openapi_context(cli, &loaded, output)?
+        {
+            return Ok(context);
+        }
+        return env_only_openapi_context(cli, output);
+    }
+
     let loaded = load_config(output)?;
     if let Some(context) = env_openapi_context(cli, &loaded, output)? {
         return Ok(context);
@@ -734,6 +755,45 @@ fn env_openapi_context(
         writer: OutputWriter::new(writer_output),
         client: OpenApiClient::new(server, token, writer_output),
     }))
+}
+
+fn env_only_openapi_context(
+    cli: &Cli,
+    output: OutputFormat,
+) -> Result<OpenApiCommandContext, CliError> {
+    let server = explicit_server(cli).ok_or_else(|| {
+        CliError::authentication_required(
+            "Provide --server or APOLLO_SERVER when using APOLLO_TOKEN without a profile.",
+            output,
+        )
+    })?;
+    let writer_output = output_from_flags_or_env(cli).unwrap_or(output);
+    let token = credential::resolve_token(std::path::Path::new(""), None, None)
+        .map_err(|error| CliError::credential_store_unavailable(&error, writer_output))?
+        .ok_or_else(|| {
+            CliError::authentication_required(
+                "Authenticate with APOLLO_TOKEN or `apollo auth login` before calling OpenAPI.",
+                writer_output,
+            )
+        })?;
+    let selected_profile = cli
+        .global
+        .profile
+        .clone()
+        .and_then(non_blank)
+        .or_else(|| std::env::var("APOLLO_PROFILE").ok().and_then(non_blank));
+    let context = RuntimeContext {
+        profile: selected_profile,
+        server: Some(server.clone()),
+        output: writer_output,
+        operator: None,
+        credential: None,
+    };
+    Ok(OpenApiCommandContext {
+        context,
+        writer: OutputWriter::new(writer_output),
+        client: OpenApiClient::new(server, token, writer_output),
+    })
 }
 
 fn render_openapi_response(writer: &OutputWriter, response: &OpenApiResponse) -> RenderedOutput {

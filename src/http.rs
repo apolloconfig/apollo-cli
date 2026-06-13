@@ -153,7 +153,12 @@ fn redact_exact_token_value(value: Value, token: &str) -> Value {
         ),
         Value::Object(map) => Value::Object(
             map.into_iter()
-                .map(|(key, value)| (key, redact_exact_token_value(value, token)))
+                .map(|(key, value)| {
+                    (
+                        key.replace(token, "[REDACTED]"),
+                        redact_exact_token_value(value, token),
+                    )
+                })
                 .collect(),
         ),
         value => value,

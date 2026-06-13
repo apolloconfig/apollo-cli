@@ -595,7 +595,7 @@ key = "dev"
         .expect("credential dir");
     fs::write(credential_file_path(&home, "dev"), "secret-from-file\n").expect("credential file");
 
-    base_command(&home)
+    let assert = base_command(&home)
         .args([
             "--server",
             "https://apollo-new.example.com",
@@ -606,6 +606,10 @@ key = "dev"
         ])
         .assert()
         .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    assert!(stdout.contains("Credential backend: file"));
+    assert!(stdout.contains("Credential key: dev"));
 
     let config = fs::read_to_string(config_path(&home)).expect("config file");
     assert!(config.contains("server = \"https://apollo-new.example.com\""));
