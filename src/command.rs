@@ -72,13 +72,14 @@ fn execute_auth(
     cli: &Cli,
     output: OutputFormat,
 ) -> Result<RenderedOutput, CliError> {
-    let loaded = load_config(output)?;
-
     match command {
         AuthCommand::Status => {
             if env_token_is_set() {
-                let writer_output = resolve_output(cli, &loaded, output)
-                    .unwrap_or_else(|_| output_from_flags_or_env(cli).unwrap_or(output));
+                let loaded = load_config(output).ok();
+                let writer_output = loaded
+                    .as_ref()
+                    .and_then(|loaded| resolve_output(cli, loaded, output).ok())
+                    .unwrap_or_else(|| output_from_flags_or_env(cli).unwrap_or(output));
                 let writer = OutputWriter::new(writer_output);
                 let profile = cli
                     .global
@@ -86,7 +87,12 @@ fn execute_auth(
                     .clone()
                     .and_then(non_blank)
                     .or_else(|| std::env::var("APOLLO_PROFILE").ok().and_then(non_blank))
-                    .or_else(|| loaded.config.active_profile.clone().and_then(non_blank));
+                    .or_else(|| {
+                        loaded
+                            .as_ref()
+                            .and_then(|loaded| loaded.config.active_profile.clone())
+                            .and_then(non_blank)
+                    });
                 let response = AuthStatusResponse {
                     authenticated: true,
                     source: "env".to_owned(),
@@ -97,6 +103,7 @@ fn execute_auth(
                 return Ok(writer.render_success(&response, response.render_table()));
             }
 
+            let loaded = load_config(output)?;
             let writer_output = resolve_output(cli, &loaded, output)?;
             let writer = OutputWriter::new(writer_output);
             let context = resolve_context(cli, &loaded, output)?;
@@ -115,6 +122,7 @@ fn execute_auth(
             token_stdin,
             store_token_in_file,
         } => {
+            let loaded = load_config(output)?;
             let writer_output = resolve_output(cli, &loaded, output)?;
             let writer = OutputWriter::new(writer_output);
             let context = resolve_context(cli, &loaded, output)?;
@@ -150,6 +158,7 @@ fn execute_auth(
             Ok(writer.render_success(&response, response.render_table()))
         }
         AuthCommand::Logout => {
+            let loaded = load_config(output)?;
             let writer_output = resolve_output(cli, &loaded, output)?;
             let writer = OutputWriter::new(writer_output);
             let context = resolve_context(cli, &loaded, output)?;
@@ -276,7 +285,8 @@ fn execute_profile_setup(
     output: OutputFormat,
 ) -> Result<RenderedOutput, CliError> {
     let loaded = load_config(output)?;
-    let writer_output = output_from_flags_or_env(cli).unwrap_or(output);
+    let writer_output = resolve_output(cli, &loaded, output)
+        .unwrap_or_else(|_| output_from_flags_or_env(cli).unwrap_or(output));
     let writer = OutputWriter::new(writer_output);
     let interactive = is_interactive_terminal();
 
@@ -363,7 +373,7 @@ fn execute_app(
             }
         }
         AppCommand::Get { app_id } => {
-            append_query("/openapi/v1/apps".to_owned(), "appIds", &app_id)
+            format!("/openapi/v1/apps/{}", encode_path_segment(&app_id))
         }
     };
     openapi.request("GET", &path, None)
@@ -412,28 +422,8 @@ fn execute_namespace(
                 &openapi.context,
                 openapi.context.output,
             )?;
-            let app_namespace_name = if public_namespace {
-                let path = format!(
-                    "/openapi/v1/apps/{}/appnamespaces",
-                    encode_path_segment(&scope.app)
-                );
-                let body = json!({
-                    "appId": scope.app,
-                    "name": name,
-                    "format": "properties",
-                    "isPublic": true,
-                    "dataChangeCreatedBy": operator,
-                });
-                let response = openapi.client.request("POST", &path, Some(body))?;
-                response
-                    .data
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or(&name)
-                    .to_owned()
-            } else {
-                name
-            };
+            let app_namespace_name =
+                register_app_namespace(&openapi, &scope.app, &name, public_namespace, &operator)?;
             let path = append_query("/openapi/v1/namespaces".to_owned(), "operator", &operator);
             let body = json!([{
                 "appId": scope.app,
@@ -443,6 +433,57 @@ fn execute_namespace(
             }]);
             openapi.request("POST", &path, Some(body))
         }
+    }
+}
+
+struct AppNamespaceRegistration {
+    name: String,
+    format: &'static str,
+}
+
+fn register_app_namespace(
+    openapi: &OpenApiCommandContext,
+    app_id: &str,
+    namespace_name: &str,
+    public_namespace: bool,
+    operator: &str,
+) -> Result<String, CliError> {
+    let registration = app_namespace_registration(namespace_name);
+    let path = format!(
+        "/openapi/v1/apps/{}/appnamespaces",
+        encode_path_segment(app_id)
+    );
+    let body = json!({
+        "appId": app_id,
+        "name": registration.name,
+        "format": registration.format,
+        "isPublic": public_namespace,
+        "dataChangeCreatedBy": operator,
+    });
+    let response = openapi.client.request("POST", &path, Some(body))?;
+    Ok(response
+        .data
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or(namespace_name)
+        .to_owned())
+}
+
+fn app_namespace_registration(namespace_name: &str) -> AppNamespaceRegistration {
+    let lowercase_name = namespace_name.to_ascii_lowercase();
+    for format in ["yaml", "yml", "json", "xml"] {
+        let suffix = format!(".{format}");
+        if lowercase_name.ends_with(&suffix) && namespace_name.len() > suffix.len() {
+            return AppNamespaceRegistration {
+                name: namespace_name[..namespace_name.len() - suffix.len()].to_owned(),
+                format,
+            };
+        }
+    }
+
+    AppNamespaceRegistration {
+        name: namespace_name.to_owned(),
+        format: "properties",
     }
 }
 

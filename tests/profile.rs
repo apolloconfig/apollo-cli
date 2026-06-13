@@ -544,6 +544,37 @@ output = "json"
 }
 
 #[test]
+fn profile_add_honors_active_profile_output_config() {
+    let home = temp_home();
+    write_config(
+        &home,
+        r#"
+active_profile = "local"
+
+[profiles.local]
+server = "http://127.0.0.1:8070"
+output = "json"
+"#,
+    );
+
+    let assert = base_command(&home)
+        .args([
+            "--server",
+            "https://apollo-prod.example.com",
+            "profile",
+            "add",
+            "prod",
+        ])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let json: Value = serde_json::from_str(&stdout).expect("json stdout");
+    assert_eq!(json["profile"], "prod");
+    assert_eq!(json["activeProfile"], "local");
+}
+
+#[test]
 fn profile_add_with_use_sets_active_profile() {
     let home = temp_home();
     write_config(

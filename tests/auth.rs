@@ -67,6 +67,30 @@ fn auth_status_reports_environment_token_without_profile() {
 }
 
 #[test]
+fn auth_status_reports_environment_token_without_config_home() {
+    let home = temp_home();
+
+    let assert = base_command(&home)
+        .env("APOLLO_TOKEN", "secret-from-env")
+        .env_remove("HOME")
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("APPDATA")
+        .args(["--output", "json", "auth", "status"])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let json: Value = serde_json::from_str(&stdout).expect("json stdout");
+
+    assert_eq!(json["authenticated"], true);
+    assert_eq!(json["source"], "env");
+    assert_eq!(json["backend"], "env");
+    assert_eq!(json["key"], "APOLLO_TOKEN");
+    assert!(json["profile"].is_null());
+    assert!(!stdout.contains("secret-from-env"));
+}
+
+#[test]
 fn auth_status_reports_environment_token_with_stale_active_profile() {
     let home = temp_home();
     write_config(

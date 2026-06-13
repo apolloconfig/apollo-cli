@@ -167,10 +167,10 @@ fn config_path_for_platform(
                 .get("XDG_CONFIG_HOME")
                 .filter(|value| !value.is_empty())
                 .cloned()
+                .map(PathBuf::from)
+                .filter(|path| path.is_absolute())
             {
-                Ok(PathBuf::from(xdg_config_home)
-                    .join("apollo")
-                    .join("config.toml"))
+                Ok(xdg_config_home.join("apollo").join("config.toml"))
             } else {
                 Ok(home()?.join(".config").join("apollo").join("config.toml"))
             }
@@ -290,6 +290,19 @@ mod tests {
         let vars = HashMap::from([
             (String::from("HOME"), OsString::from("/home/tester")),
             (String::from("XDG_CONFIG_HOME"), OsString::from("")),
+        ]);
+        let path = config_path_for_platform(Platform::Linux, &vars).expect("linux xdg path");
+        assert_eq!(
+            path,
+            PathBuf::from("/home/tester/.config/apollo/config.toml")
+        );
+    }
+
+    #[test]
+    fn config_path_treats_relative_linux_xdg_as_unset() {
+        let vars = HashMap::from([
+            (String::from("HOME"), OsString::from("/home/tester")),
+            (String::from("XDG_CONFIG_HOME"), OsString::from(".config")),
         ]);
         let path = config_path_for_platform(Platform::Linux, &vars).expect("linux xdg path");
         assert_eq!(

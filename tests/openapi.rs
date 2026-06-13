@@ -112,7 +112,7 @@ fn app_and_env_commands_call_openapi_endpoints() {
         .stdout(predicate::str::contains(r#""appId": "demo""#));
     assert_eq!(app_server.request().path, "/openapi/v1/apps");
 
-    let app_get_server = TestServer::json(r#"[{"appId":"demo"}]"#);
+    let app_get_server = TestServer::json(r#"{"appId":"demo"}"#);
     write_config(&home, &profile_config(&app_get_server.url()));
     base_command(&home)
         .env("APOLLO_TOKEN", "consumer-token")
@@ -120,10 +120,7 @@ fn app_and_env_commands_call_openapi_endpoints() {
         .assert()
         .success()
         .stdout(predicate::str::contains(r#""appId": "demo""#));
-    assert_eq!(
-        app_get_server.request().path,
-        "/openapi/v1/apps?appIds=demo"
-    );
+    assert_eq!(app_get_server.request().path, "/openapi/v1/apps/demo");
 
     let env_server = TestServer::json(r#"["DEV","FAT"]"#);
     write_config(&home, &profile_config(&env_server.url()));
@@ -463,7 +460,10 @@ fn config_set_falls_back_to_create_when_update_reports_missing_item() {
 
 #[test]
 fn namespace_create_with_yes_sends_namespace_instance_payload() {
-    let server = TestServer::empty();
+    let server = TestServer::sequence(vec![
+        (200, "application/json", r#"{"name":"settings.json"}"#),
+        (200, "application/json", "{}"),
+    ]);
     let home = temp_home();
     write_config(
         &home,
@@ -482,25 +482,41 @@ fn namespace_create_with_yes_sends_namespace_instance_payload() {
             "DEV",
             "--app",
             "demo",
-            "application",
+            "settings.json",
         ])
         .assert()
         .success();
 
-    let request = server.request();
-    assert_eq!(request.method, "POST");
-    assert_eq!(request.path, "/openapi/v1/namespaces?operator=apollo-bot");
-    let body: Value = serde_json::from_str(&request.body).expect("json body");
-    assert_eq!(body[0]["appId"], "demo");
-    assert_eq!(body[0]["env"], "DEV");
-    assert_eq!(body[0]["clusterName"], "default");
-    assert_eq!(body[0]["appNamespaceName"], "application");
+    let requests = server.requests(2);
+    assert_eq!(requests[0].method, "POST");
+    assert_eq!(requests[0].path, "/openapi/v1/apps/demo/appnamespaces");
+    let app_namespace_body: Value = serde_json::from_str(&requests[0].body).expect("json body");
+    assert_eq!(app_namespace_body["appId"], "demo");
+    assert_eq!(app_namespace_body["name"], "settings");
+    assert_eq!(app_namespace_body["format"], "json");
+    assert_eq!(app_namespace_body["isPublic"], false);
+    assert_eq!(app_namespace_body["dataChangeCreatedBy"], "apollo-bot");
+
+    assert_eq!(requests[1].method, "POST");
+    assert_eq!(
+        requests[1].path,
+        "/openapi/v1/namespaces?operator=apollo-bot"
+    );
+    let namespace_body: Value = serde_json::from_str(&requests[1].body).expect("json body");
+    assert_eq!(namespace_body[0]["appId"], "demo");
+    assert_eq!(namespace_body[0]["env"], "DEV");
+    assert_eq!(namespace_body[0]["clusterName"], "default");
+    assert_eq!(namespace_body[0]["appNamespaceName"], "settings.json");
 }
 
 #[test]
 fn namespace_create_with_public_flag_sends_public_namespace_payload() {
     let server = TestServer::sequence(vec![
-        (200, "application/json", r#"{"name":"public.application"}"#),
+        (
+            200,
+            "application/json",
+            r#"{"name":"public.application.yml"}"#,
+        ),
         (200, "application/json", "{}"),
     ]);
     let home = temp_home();
@@ -522,7 +538,7 @@ fn namespace_create_with_public_flag_sends_public_namespace_payload() {
             "--app",
             "demo",
             "--public",
-            "application",
+            "application.yml",
         ])
         .assert()
         .success();
@@ -533,7 +549,7 @@ fn namespace_create_with_public_flag_sends_public_namespace_payload() {
     let app_namespace_body: Value = serde_json::from_str(&requests[0].body).expect("json body");
     assert_eq!(app_namespace_body["appId"], "demo");
     assert_eq!(app_namespace_body["name"], "application");
-    assert_eq!(app_namespace_body["format"], "properties");
+    assert_eq!(app_namespace_body["format"], "yml");
     assert_eq!(app_namespace_body["isPublic"], true);
     assert_eq!(app_namespace_body["dataChangeCreatedBy"], "apollo-bot");
 
@@ -546,7 +562,10 @@ fn namespace_create_with_public_flag_sends_public_namespace_payload() {
     assert_eq!(namespace_body[0]["appId"], "demo");
     assert_eq!(namespace_body[0]["env"], "DEV");
     assert_eq!(namespace_body[0]["clusterName"], "default");
-    assert_eq!(namespace_body[0]["appNamespaceName"], "public.application");
+    assert_eq!(
+        namespace_body[0]["appNamespaceName"],
+        "public.application.yml"
+    );
 }
 
 #[test]
