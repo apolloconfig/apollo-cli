@@ -448,6 +448,10 @@ fn register_app_namespace(
     public_namespace: bool,
     operator: &str,
 ) -> Result<String, CliError> {
+    if let Some(existing_name) = find_app_namespace(openapi, app_id, namespace_name)? {
+        return Ok(existing_name);
+    }
+
     let registration = app_namespace_registration(namespace_name);
     let path = format!(
         "/openapi/v1/apps/{}/appnamespaces",
@@ -467,6 +471,30 @@ fn register_app_namespace(
         .and_then(Value::as_str)
         .unwrap_or(namespace_name)
         .to_owned())
+}
+
+fn find_app_namespace(
+    openapi: &OpenApiCommandContext,
+    app_id: &str,
+    namespace_name: &str,
+) -> Result<Option<String>, CliError> {
+    let path = format!(
+        "/openapi/v1/apps/{}/appnamespaces/{}",
+        encode_path_segment(app_id),
+        encode_path_segment(namespace_name)
+    );
+    match openapi.client.request("GET", &path, None) {
+        Ok(response) => Ok(Some(
+            response
+                .data
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or(namespace_name)
+                .to_owned(),
+        )),
+        Err(error) if error.http_status_code() == Some(404) => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 fn app_namespace_registration(namespace_name: &str) -> AppNamespaceRegistration {

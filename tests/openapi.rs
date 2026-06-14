@@ -461,6 +461,7 @@ fn config_set_falls_back_to_create_when_update_reports_missing_item() {
 #[test]
 fn namespace_create_with_yes_sends_namespace_instance_payload() {
     let server = TestServer::sequence(vec![
+        (404, "application/json", r#"{"message":"not found"}"#),
         (200, "application/json", r#"{"name":"settings.json"}"#),
         (200, "application/json", "{}"),
     ]);
@@ -487,22 +488,28 @@ fn namespace_create_with_yes_sends_namespace_instance_payload() {
         .assert()
         .success();
 
-    let requests = server.requests(2);
-    assert_eq!(requests[0].method, "POST");
-    assert_eq!(requests[0].path, "/openapi/v1/apps/demo/appnamespaces");
-    let app_namespace_body: Value = serde_json::from_str(&requests[0].body).expect("json body");
+    let requests = server.requests(3);
+    assert_eq!(requests[0].method, "GET");
+    assert_eq!(
+        requests[0].path,
+        "/openapi/v1/apps/demo/appnamespaces/settings.json"
+    );
+
+    assert_eq!(requests[1].method, "POST");
+    assert_eq!(requests[1].path, "/openapi/v1/apps/demo/appnamespaces");
+    let app_namespace_body: Value = serde_json::from_str(&requests[1].body).expect("json body");
     assert_eq!(app_namespace_body["appId"], "demo");
     assert_eq!(app_namespace_body["name"], "settings");
     assert_eq!(app_namespace_body["format"], "json");
     assert_eq!(app_namespace_body["isPublic"], false);
     assert_eq!(app_namespace_body["dataChangeCreatedBy"], "apollo-bot");
 
-    assert_eq!(requests[1].method, "POST");
+    assert_eq!(requests[2].method, "POST");
     assert_eq!(
-        requests[1].path,
+        requests[2].path,
         "/openapi/v1/namespaces?operator=apollo-bot"
     );
-    let namespace_body: Value = serde_json::from_str(&requests[1].body).expect("json body");
+    let namespace_body: Value = serde_json::from_str(&requests[2].body).expect("json body");
     assert_eq!(namespace_body[0]["appId"], "demo");
     assert_eq!(namespace_body[0]["env"], "DEV");
     assert_eq!(namespace_body[0]["clusterName"], "default");
@@ -510,8 +517,53 @@ fn namespace_create_with_yes_sends_namespace_instance_payload() {
 }
 
 #[test]
+fn namespace_create_reuses_existing_appnamespace() {
+    let server = TestServer::sequence(vec![
+        (200, "application/json", r#"{"name":"application"}"#),
+        (200, "application/json", "{}"),
+    ]);
+    let home = temp_home();
+    write_config(
+        &home,
+        &profile_config_with_operator(&server.url(), "apollo-bot"),
+    );
+
+    base_command(&home)
+        .env("APOLLO_TOKEN", "consumer-token")
+        .args([
+            "--yes",
+            "--output",
+            "json",
+            "namespace",
+            "create",
+            "--env",
+            "DEV",
+            "--app",
+            "demo",
+            "application",
+        ])
+        .assert()
+        .success();
+
+    let requests = server.requests(2);
+    assert_eq!(requests[0].method, "GET");
+    assert_eq!(
+        requests[0].path,
+        "/openapi/v1/apps/demo/appnamespaces/application"
+    );
+    assert_eq!(requests[1].method, "POST");
+    assert_eq!(
+        requests[1].path,
+        "/openapi/v1/namespaces?operator=apollo-bot"
+    );
+    let namespace_body: Value = serde_json::from_str(&requests[1].body).expect("json body");
+    assert_eq!(namespace_body[0]["appNamespaceName"], "application");
+}
+
+#[test]
 fn namespace_create_with_public_flag_sends_public_namespace_payload() {
     let server = TestServer::sequence(vec![
+        (404, "application/json", r#"{"message":"not found"}"#),
         (
             200,
             "application/json",
@@ -543,22 +595,28 @@ fn namespace_create_with_public_flag_sends_public_namespace_payload() {
         .assert()
         .success();
 
-    let requests = server.requests(2);
-    assert_eq!(requests[0].method, "POST");
-    assert_eq!(requests[0].path, "/openapi/v1/apps/demo/appnamespaces");
-    let app_namespace_body: Value = serde_json::from_str(&requests[0].body).expect("json body");
+    let requests = server.requests(3);
+    assert_eq!(requests[0].method, "GET");
+    assert_eq!(
+        requests[0].path,
+        "/openapi/v1/apps/demo/appnamespaces/application.yml"
+    );
+
+    assert_eq!(requests[1].method, "POST");
+    assert_eq!(requests[1].path, "/openapi/v1/apps/demo/appnamespaces");
+    let app_namespace_body: Value = serde_json::from_str(&requests[1].body).expect("json body");
     assert_eq!(app_namespace_body["appId"], "demo");
     assert_eq!(app_namespace_body["name"], "application");
     assert_eq!(app_namespace_body["format"], "yml");
     assert_eq!(app_namespace_body["isPublic"], true);
     assert_eq!(app_namespace_body["dataChangeCreatedBy"], "apollo-bot");
 
-    assert_eq!(requests[1].method, "POST");
+    assert_eq!(requests[2].method, "POST");
     assert_eq!(
-        requests[1].path,
+        requests[2].path,
         "/openapi/v1/namespaces?operator=apollo-bot"
     );
-    let namespace_body: Value = serde_json::from_str(&requests[1].body).expect("json body");
+    let namespace_body: Value = serde_json::from_str(&requests[2].body).expect("json body");
     assert_eq!(namespace_body[0]["appId"], "demo");
     assert_eq!(namespace_body[0]["env"], "DEV");
     assert_eq!(namespace_body[0]["clusterName"], "default");
