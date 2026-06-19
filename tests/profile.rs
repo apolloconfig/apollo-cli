@@ -69,6 +69,42 @@ output = "table"
 }
 
 #[test]
+fn init_uses_apollo_server_environment_override() {
+    let home = temp_home();
+
+    let assert = base_command(&home)
+        .env("APOLLO_SERVER", "https://apollo-env.example.com")
+        .args(["--output", "json", "init"])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let json: Value = serde_json::from_str(&stdout).expect("json stdout");
+
+    assert_eq!(json["server"], "https://apollo-env.example.com");
+    let config = fs::read_to_string(config_path(&home)).expect("config");
+    assert!(config.contains("server = \"https://apollo-env.example.com\""));
+}
+
+#[test]
+fn profile_add_uses_apollo_server_environment_override() {
+    let home = temp_home();
+
+    let assert = base_command(&home)
+        .env("APOLLO_SERVER", "https://apollo-env.example.com")
+        .args(["--output", "json", "profile", "add", "dev"])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let json: Value = serde_json::from_str(&stdout).expect("json stdout");
+
+    assert_eq!(json["server"], "https://apollo-env.example.com");
+    let config = fs::read_to_string(config_path(&home)).expect("config");
+    assert!(config.contains("server = \"https://apollo-env.example.com\""));
+}
+
+#[test]
 fn profile_show_ignores_blank_environment_overrides() {
     let home = temp_home();
     write_config(

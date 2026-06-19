@@ -138,7 +138,11 @@ impl CredentialStore for FileCredentialStore {
             return Ok(None);
         }
         let token = fs::read_to_string(path).map_err(|error| error.to_string())?;
-        Ok(Some(Sensitive::new(token.trim().to_owned())))
+        let token = token.trim();
+        if token.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(Sensitive::new(token.to_owned())))
     }
 
     fn set(&self, key: &str, token: &Sensitive) -> Result<(), String> {

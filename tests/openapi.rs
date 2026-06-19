@@ -815,6 +815,46 @@ fn namespace_create_with_yes_sends_namespace_instance_payload() {
 }
 
 #[test]
+fn namespace_create_infers_txt_appnamespace_format() {
+    let server = TestServer::sequence(vec![
+        (404, "application/json", r#"{"message":"not found"}"#),
+        (200, "application/json", r#"{"name":"message.txt"}"#),
+        (200, "application/json", "{}"),
+    ]);
+    let home = temp_home();
+    write_config(
+        &home,
+        &profile_config_with_operator(&server.url(), "apollo-bot"),
+    );
+
+    base_command(&home)
+        .env("APOLLO_TOKEN", "consumer-token")
+        .args([
+            "--yes",
+            "--output",
+            "json",
+            "namespace",
+            "create",
+            "--env",
+            "DEV",
+            "--app",
+            "demo",
+            "message.txt",
+        ])
+        .assert()
+        .success();
+
+    let requests = server.requests(3);
+    assert_eq!(requests[1].method, "POST");
+    assert_eq!(requests[1].path, "/openapi/v1/apps/demo/appnamespaces");
+    let app_namespace_body: Value = serde_json::from_str(&requests[1].body).expect("json body");
+    assert_eq!(app_namespace_body["name"], "message");
+    assert_eq!(app_namespace_body["format"], "txt");
+    let namespace_body: Value = serde_json::from_str(&requests[2].body).expect("json body");
+    assert_eq!(namespace_body[0]["appNamespaceName"], "message.txt");
+}
+
+#[test]
 fn namespace_create_treats_apollo_missing_appnamespace_400_as_absent() {
     let server = TestServer::sequence(vec![
         (
@@ -962,6 +1002,55 @@ fn namespace_create_reuses_existing_appnamespace() {
 }
 
 #[test]
+fn namespace_create_rejects_public_flag_for_existing_private_appnamespace() {
+    let server = TestServer::sequence(vec![
+        (
+            200,
+            "application/json",
+            r#"{"name":"application","isPublic":false}"#,
+        ),
+        (200, "application/json", "{}"),
+    ]);
+    let home = temp_home();
+    write_config(
+        &home,
+        &profile_config_with_operator(&server.url(), "apollo-bot"),
+    );
+
+    let assert = base_command(&home)
+        .env("APOLLO_TOKEN", "consumer-token")
+        .args([
+            "--yes",
+            "--output",
+            "json",
+            "namespace",
+            "create",
+            "--env",
+            "DEV",
+            "--app",
+            "demo",
+            "--public",
+            "application",
+        ])
+        .assert()
+        .failure();
+
+    assert!(assert.get_output().stdout.is_empty());
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf8 stderr");
+    let json: Value = serde_json::from_str(&stderr).expect("json stderr");
+    assert_eq!(json["error"]["code"], "invalid_input");
+    assert!(stderr.contains("private"));
+    assert!(stderr.contains("--public"));
+
+    let request = server.request();
+    assert_eq!(request.method, "GET");
+    assert_eq!(
+        request.path,
+        "/openapi/v1/apps/demo/appnamespaces/application"
+    );
+}
+
+#[test]
 fn namespace_create_with_public_flag_sends_public_namespace_payload() {
     let server = TestServer::sequence(vec![
         (404, "application/json", r#"{"message":"not found"}"#),
@@ -1025,6 +1114,47 @@ fn namespace_create_with_public_flag_sends_public_namespace_payload() {
         namespace_body[0]["appNamespaceName"],
         "public.application.yml"
     );
+}
+
+#[test]
+fn user_token_rejects_namespace_and_release_write_endpoints_without_network_call() {
+    let home = temp_home();
+    write_config(
+        &home,
+        &profile_config_with_auth_mode("http://127.0.0.1:9", "user-token"),
+    );
+    write_file_credential(&home, "dev", "apollo_pat_stored_token");
+
+    for args in [
+        vec![
+            "--yes",
+            "--output",
+            "json",
+            "namespace",
+            "create",
+            "--env",
+            "DEV",
+            "--app",
+            "demo",
+            "settings",
+        ],
+        vec![
+            "--yes", "--output", "json", "release", "create", "--env", "DEV", "--app", "demo",
+            "--title", "release",
+        ],
+        vec![
+            "--yes", "--output", "json", "release", "rollback", "--env", "DEV", "42",
+        ],
+    ] {
+        let assert = base_command(&home).args(args).assert().failure();
+
+        assert!(assert.get_output().stdout.is_empty());
+        let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf8 stderr");
+        let json: Value = serde_json::from_str(&stderr).expect("json stderr");
+        assert_eq!(json["error"]["code"], "invalid_input");
+        assert!(stderr.contains("consumer-token"));
+        assert!(stderr.contains("user-token"));
+    }
 }
 
 #[test]

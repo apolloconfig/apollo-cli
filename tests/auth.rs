@@ -67,6 +67,26 @@ fn auth_status_reports_environment_token_without_profile() {
 }
 
 #[test]
+fn auth_status_reports_unauthenticated_without_profile_or_token() {
+    let home = temp_home();
+
+    let assert = base_command(&home)
+        .args(["--output", "json", "auth", "status"])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let json: Value = serde_json::from_str(&stdout).expect("json stdout");
+
+    assert_eq!(json["authenticated"], false);
+    assert_eq!(json["source"], "none");
+    assert!(json["profile"].is_null());
+    assert!(json["authMode"].is_null());
+    assert!(json["backend"].is_null());
+    assert!(json["key"].is_null());
+}
+
+#[test]
 fn auth_status_reports_environment_token_without_config_home() {
     let home = temp_home();
 
@@ -421,6 +441,40 @@ key = "dev"
     assert_eq!(json["authenticated"], true);
     assert_eq!(json["source"], "file");
     assert!(!stdout.contains("secret-from-file"));
+}
+
+#[test]
+fn auth_status_treats_empty_file_credential_as_unauthenticated() {
+    let home = temp_home();
+    write_config(
+        &home,
+        r#"
+active_profile = "dev"
+
+[profiles.dev]
+server = "https://apollo-dev.example.com"
+
+[profiles.dev.credential]
+backend = "file"
+key = "dev"
+"#,
+    );
+    fs::create_dir_all(credential_file_path(&home, "dev").parent().expect("parent"))
+        .expect("credential dir");
+    fs::write(credential_file_path(&home, "dev"), "  \n\t").expect("credential file");
+
+    let assert = base_command(&home)
+        .args(["--output", "json", "auth", "status"])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let json: Value = serde_json::from_str(&stdout).expect("json stdout");
+
+    assert_eq!(json["authenticated"], false);
+    assert_eq!(json["source"], "file");
+    assert_eq!(json["backend"], "file");
+    assert_eq!(json["key"], "dev");
 }
 
 #[test]

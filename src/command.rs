@@ -115,7 +115,17 @@ fn execute_auth(
             let writer_output = resolve_output(cli, &loaded, output)?;
             let writer = OutputWriter::new(writer_output);
             let context = resolve_context(cli, &loaded, output)?;
-            let profile = required_profile(&context, writer_output)?;
+            let Some(profile) = context.profile.clone() else {
+                let response = AuthStatusResponse {
+                    authenticated: false,
+                    source: "none".to_owned(),
+                    profile: None,
+                    auth_mode: None,
+                    backend: None,
+                    key: None,
+                };
+                return Ok(writer.render_success(&response, response.render_table()));
+            };
             let status = credential::status(&loaded.path, &profile, context.credential.as_ref());
             let response = AuthStatusResponse {
                 authenticated: status.authenticated,
@@ -460,6 +470,11 @@ fn execute_namespace(
             operator,
             public_namespace,
         } => {
+            require_consumer_token_for_operator_backed_write(
+                &openapi.context,
+                "namespace create",
+                openapi.context.output,
+            )?;
             let operator = operator_for_mutation(
                 operator.as_deref(),
                 &openapi.context,
@@ -516,8 +531,14 @@ fn register_app_namespace(
     public_namespace: bool,
     operator: Option<&str>,
 ) -> Result<String, CliError> {
-    if let Some(existing_name) = find_app_namespace(openapi, app_id, namespace_name)? {
-        return Ok(existing_name);
+    if let Some(existing) = find_app_namespace(openapi, app_id, namespace_name)? {
+        if public_namespace && matches!(existing.is_public, Some(false)) {
+            return Err(CliError::invalid_input(
+                "existing app namespace is private; remove --public or create a public app namespace before reusing it",
+                openapi.context.output,
+            ));
+        }
+        return Ok(existing.name);
     }
 
     let registration = app_namespace_registration(namespace_name);
@@ -543,25 +564,31 @@ fn register_app_namespace(
         .to_owned())
 }
 
+struct ExistingAppNamespace {
+    name: String,
+    is_public: Option<bool>,
+}
+
 fn find_app_namespace(
     openapi: &OpenApiCommandContext,
     app_id: &str,
     namespace_name: &str,
-) -> Result<Option<String>, CliError> {
+) -> Result<Option<ExistingAppNamespace>, CliError> {
     let path = format!(
         "/openapi/v1/apps/{}/appnamespaces/{}",
         encode_path_segment(app_id),
         encode_path_segment(namespace_name)
     );
     match openapi.client.request("GET", &path, None) {
-        Ok(response) => Ok(Some(
-            response
+        Ok(response) => Ok(Some(ExistingAppNamespace {
+            name: response
                 .data
                 .get("name")
                 .and_then(Value::as_str)
                 .unwrap_or(namespace_name)
                 .to_owned(),
-        )),
+            is_public: response.data.get("isPublic").and_then(Value::as_bool),
+        })),
         Err(error) if is_missing_app_namespace(&error) => Ok(None),
         Err(error) => Err(error),
     }
@@ -584,7 +611,7 @@ fn is_namespace_create_reported_failed(error: &CliError) -> bool {
 
 fn app_namespace_registration(namespace_name: &str) -> AppNamespaceRegistration {
     let lowercase_name = namespace_name.to_ascii_lowercase();
-    for format in ["yaml", "yml", "json", "xml"] {
+    for format in ["yaml", "yml", "json", "xml", "txt"] {
         let suffix = format!(".{format}");
         if lowercase_name.ends_with(&suffix) && namespace_name.len() > suffix.len() {
             return AppNamespaceRegistration {
@@ -753,6 +780,11 @@ fn execute_release(
             emergency,
             operator,
         } => {
+            require_consumer_token_for_operator_backed_write(
+                &openapi.context,
+                "release create",
+                openapi.context.output,
+            )?;
             let operator = operator_for_mutation(
                 operator.as_deref(),
                 &openapi.context,
@@ -775,6 +807,11 @@ fn execute_release(
             to_release_id,
             operator,
         } => {
+            require_consumer_token_for_operator_backed_write(
+                &openapi.context,
+                "release rollback",
+                openapi.context.output,
+            )?;
             let operator = operator_for_mutation(
                 operator.as_deref(),
                 &openapi.context,
@@ -1191,6 +1228,22 @@ fn operator_for_mutation(
     required_operator(command_operator, context, output).map(Some)
 }
 
+fn require_consumer_token_for_operator_backed_write(
+    context: &RuntimeContext,
+    command_name: &str,
+    output: OutputFormat,
+) -> Result<(), CliError> {
+    if context.auth_mode.is_user_token() {
+        return Err(CliError::invalid_input(
+            &format!(
+                "{command_name} does not support user-token auth yet because the Apollo server endpoint still requires consumer-token operator resolution; use a consumer-token profile for this command"
+            ),
+            output,
+        ));
+    }
+    Ok(())
+}
+
 fn append_optional_query(path: String, key: &str, value: Option<&str>) -> String {
     match value {
         Some(value) => append_query(path, key, value),
@@ -1343,6 +1396,7 @@ fn resolve_setup_server(
         .server
         .clone()
         .and_then(non_blank)
+        .or_else(|| std::env::var("APOLLO_SERVER").ok().and_then(non_blank))
         .or_else(|| match options.mode {
             ProfileSetupMode::Init => Some(DEFAULT_INIT_SERVER.to_owned()),
             ProfileSetupMode::Add => None,
