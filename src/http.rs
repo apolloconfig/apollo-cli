@@ -3,7 +3,7 @@ use serde_json::Value;
 use std::fmt;
 use std::time::Duration;
 
-use crate::cli::OutputFormat;
+use crate::cli::{AuthMode, OutputFormat};
 use crate::error::CliError;
 use crate::redaction::{Redactor, Sensitive};
 
@@ -52,17 +52,27 @@ impl Serialize for OpenApiResponse {
 pub struct OpenApiClient {
     server: String,
     token: Sensitive,
+    auth_mode: AuthMode,
     format: OutputFormat,
     client: reqwest::blocking::Client,
 }
 
 impl OpenApiClient {
-    pub fn new(server: String, token: Sensitive, format: OutputFormat) -> Self {
+    pub fn new(
+        server: String,
+        token: Sensitive,
+        auth_mode: AuthMode,
+        format: OutputFormat,
+    ) -> Self {
         Self {
             server: server.trim_end_matches('/').to_owned(),
             token,
+            auth_mode,
             format,
-            client: reqwest::blocking::Client::new(),
+            client: reqwest::blocking::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .expect("OpenAPI HTTP client should build"),
         }
     }
 
@@ -79,7 +89,7 @@ impl OpenApiClient {
         let mut request = self
             .client
             .request(method, &url)
-            .header(reqwest::header::AUTHORIZATION, self.token.expose_secret())
+            .header(reqwest::header::AUTHORIZATION, self.authorization_header())
             .header(reqwest::header::ACCEPT, "application/json");
         if let Some(body) = body {
             request = request.json(&body);
@@ -90,12 +100,27 @@ impl OpenApiClient {
             .send()
             .map_err(|error| CliError::network(&path, &error.to_string(), self.format))?;
         let status = response.status();
+        let redirect_location = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .map(ToOwned::to_owned);
         let body = response
             .text()
             .map_err(|error| CliError::network(&path, &error.to_string(), self.format))?;
 
         if !status.is_success() {
-            let body = sanitize_error_body(&body, self.token.expose_secret());
+            let mut body = sanitize_error_body(&body, self.token.expose_secret());
+            if body.is_empty()
+                && let Some(location) = redirect_location
+            {
+                body = format!("redirected to {location}");
+            }
+            if self.auth_mode.is_user_token()
+                && (matches!(status.as_u16(), 401 | 403) || status.is_redirection())
+            {
+                body = append_user_token_hint(body);
+            }
             return Err(CliError::http_status(
                 status.as_u16(),
                 &path,
@@ -116,6 +141,23 @@ impl OpenApiClient {
             redaction_token: self.token.clone(),
         })
     }
+
+    fn authorization_header(&self) -> String {
+        match self.auth_mode {
+            AuthMode::UserToken => format!("Bearer {}", self.token.expose_secret()),
+            AuthMode::ConsumerToken => self.token.expose_secret().to_owned(),
+        }
+    }
+}
+
+fn append_user_token_hint(mut body: String) -> String {
+    if !body.is_empty() {
+        body.push_str("; ");
+    }
+    body.push_str(
+        "user token authentication failed; verify the Apollo server supports user tokens, the token is not expired or revoked, and the requested resource is within token scope",
+    );
+    body
 }
 
 fn sanitize_error_body(body: &str, token: &str) -> String {

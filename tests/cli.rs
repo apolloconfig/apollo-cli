@@ -7,29 +7,48 @@ use tempfile::TempDir;
 fn help_lists_v0_command_groups_and_global_flags() {
     Command::cargo_bin("apollo")
         .expect("apollo binary")
-        .arg("--help")
+        .arg("help")
         .assert()
         .success()
-        .stdout(predicate::str::contains("init"))
-        .stdout(predicate::str::contains("auth"))
-        .stdout(predicate::str::contains("profile"))
-        .stdout(predicate::str::contains("app"))
-        .stdout(predicate::str::contains("env"))
-        .stdout(predicate::str::contains("namespace"))
-        .stdout(predicate::str::contains("config"))
-        .stdout(predicate::str::contains("release"))
-        .stdout(predicate::str::contains("api"))
-        .stdout(predicate::str::contains("--profile"))
-        .stdout(predicate::str::contains("--server"))
-        .stdout(predicate::str::contains("--output"))
-        .stdout(predicate::str::contains("--yes"));
+        .stdout(predicate::str::contains(
+            "Configure the first local profile and token",
+        ))
+        .stdout(predicate::str::contains(
+            "Log in, log out, inspect local auth, and check user tokens",
+        ))
+        .stdout(predicate::str::contains(
+            "Manage named server/token/operator profiles",
+        ))
+        .stdout(predicate::str::contains("Read Apollo application metadata"))
+        .stdout(predicate::str::contains(
+            "List environments and clusters for an app",
+        ))
+        .stdout(predicate::str::contains(
+            "List, inspect, and create namespaces",
+        ))
+        .stdout(predicate::str::contains(
+            "Read, change, diff, and sync namespace items",
+        ))
+        .stdout(predicate::str::contains(
+            "Create, list, and roll back releases",
+        ))
+        .stdout(predicate::str::contains(
+            "Send a raw Apollo Portal OpenAPI request",
+        ))
+        .stdout(predicate::str::contains("Use a named Apollo CLI profile"))
+        .stdout(predicate::str::contains(
+            "Override the Apollo Portal base URL",
+        ))
+        .stdout(predicate::str::contains("Render output as json or table"))
+        .stdout(predicate::str::contains(
+            "Skip confirmation prompts for mutating OpenAPI requests",
+        ));
 }
 
 #[test]
 fn openapi_command_without_token_returns_structured_json_error() {
-    let assert = Command::cargo_bin("apollo")
-        .expect("apollo binary")
-        .env_remove("APOLLO_TOKEN")
+    let home = temp_home();
+    let assert = base_command(&home)
         .args([
             "--server",
             "http://127.0.0.1:9",
@@ -94,9 +113,47 @@ fn auth_help_lists_v0_auth_commands() {
         .args(["auth", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("login"))
-        .stdout(predicate::str::contains("status"))
-        .stdout(predicate::str::contains("logout"));
+        .stdout(predicate::str::contains(
+            "Store a token for the active profile",
+        ))
+        .stdout(predicate::str::contains(
+            "Show local auth state without contacting the server",
+        ))
+        .stdout(predicate::str::contains(
+            "Verify the current user token and show its owner",
+        ))
+        .stdout(predicate::str::contains(
+            "List server capabilities for the current user token",
+        ))
+        .stdout(predicate::str::contains(
+            "Remove the stored token for the active profile",
+        ));
+}
+
+#[test]
+fn setup_commands_accept_auth_mode_flag() {
+    Command::cargo_bin("apollo")
+        .expect("apollo binary")
+        .args(["init", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--auth-mode"));
+
+    Command::cargo_bin("apollo")
+        .expect("apollo binary")
+        .args(["profile", "add", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--auth-mode"));
+
+    Command::cargo_bin("apollo")
+        .expect("apollo binary")
+        .args(["auth", "login", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--auth-mode"))
+        .stdout(predicate::str::contains("user-token"))
+        .stdout(predicate::str::contains("consumer-token"));
 }
 
 #[test]
@@ -106,8 +163,10 @@ fn profile_help_lists_add_command() {
         .args(["profile", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("add"))
-        .stdout(predicate::str::contains("use"));
+        .stdout(predicate::str::contains("Add or update a named profile"))
+        .stdout(predicate::str::contains("List configured profiles"))
+        .stdout(predicate::str::contains("Show the active profile"))
+        .stdout(predicate::str::contains("Set the active profile"));
 }
 
 fn base_command(home: &TempDir) -> Command {

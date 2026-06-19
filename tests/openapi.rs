@@ -47,6 +47,171 @@ fn api_get_calls_openapi_with_consumer_token() {
 }
 
 #[test]
+fn api_get_calls_openapi_with_user_token_bearer_header_from_env() {
+    let server = TestServer::json(r#"[{"appId":"demo"}]"#);
+    let home = temp_home();
+
+    let assert = base_command(&home)
+        .env("APOLLO_TOKEN", "apollo_pat_test_token")
+        .args([
+            "--server",
+            &server.url(),
+            "--output",
+            "json",
+            "api",
+            "get",
+            "/openapi/v1/apps",
+        ])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let json: Value = serde_json::from_str(&stdout).expect("json stdout");
+    assert_eq!(json["data"][0]["appId"], "demo");
+    assert!(!stdout.contains("apollo_pat_test_token"));
+
+    let request = server.request();
+    assert_eq!(request.method, "GET");
+    assert_eq!(request.path, "/openapi/v1/apps");
+    assert!(
+        request.headers.iter().any(
+            |header| header.eq_ignore_ascii_case("authorization: Bearer apollo_pat_test_token")
+        )
+    );
+}
+
+#[test]
+fn stored_user_token_profile_uses_bearer_header() {
+    let server = TestServer::json(r#"[{"appId":"demo"}]"#);
+    let home = temp_home();
+    write_config(
+        &home,
+        &profile_config_with_auth_mode(&server.url(), "user-token"),
+    );
+    write_file_credential(&home, "dev", "apollo_pat_stored_token");
+
+    base_command(&home)
+        .args(["--output", "json", "app", "list"])
+        .assert()
+        .success();
+
+    let request = server.request();
+    assert!(request.headers.iter().any(|header| {
+        header.eq_ignore_ascii_case("authorization: Bearer apollo_pat_stored_token")
+    }));
+}
+
+#[test]
+fn stored_consumer_token_profile_uses_raw_authorization_header() {
+    let server = TestServer::json(r#"[{"appId":"demo"}]"#);
+    let home = temp_home();
+    write_config(
+        &home,
+        &profile_config_with_auth_mode(&server.url(), "consumer-token"),
+    );
+    write_file_credential(&home, "dev", "consumer-stored-token");
+
+    base_command(&home)
+        .args(["--output", "json", "app", "list"])
+        .assert()
+        .success();
+
+    let request = server.request();
+    assert!(
+        request
+            .headers
+            .iter()
+            .any(|header| header.eq_ignore_ascii_case("authorization: consumer-stored-token"))
+    );
+}
+
+#[test]
+fn auth_whoami_calls_user_token_current_endpoint() {
+    let server = TestServer::json(
+        r#"{"authType":"USER_TOKEN","userId":"alice","tokenId":7,"tokenName":"local-cli","tokenPrefix":"apollo_pat_abc","rateLimit":10,"expires":"2030-01-01T00:00:00Z","dataChangeCreatedTime":"2026-01-01T00:00:00Z","denyAll":false,"allOperations":true,"operations":[],"allApps":true,"appIds":[],"allEnvs":true,"envs":[],"allNamespaces":true,"namespaces":[],"actions":[]}"#,
+    );
+    let home = temp_home();
+
+    let assert = base_command(&home)
+        .env("APOLLO_TOKEN", "apollo_pat_test_token")
+        .args([
+            "--server",
+            &server.url(),
+            "--output",
+            "json",
+            "auth",
+            "whoami",
+        ])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let json: Value = serde_json::from_str(&stdout).expect("json stdout");
+    assert_eq!(json["data"]["userId"], "alice");
+    assert!(!stdout.contains("apollo_pat_test_token"));
+
+    let request = server.request();
+    assert_eq!(request.method, "GET");
+    assert_eq!(request.path, "/openapi/v1/user-tokens/current");
+    assert!(
+        request.headers.iter().any(
+            |header| header.eq_ignore_ascii_case("authorization: Bearer apollo_pat_test_token")
+        )
+    );
+}
+
+#[test]
+fn auth_capabilities_table_summarizes_user_token_scope() {
+    let server = TestServer::json(
+        r#"{"authType":"USER_TOKEN","userId":"alice","tokenId":7,"tokenName":"local-cli","tokenPrefix":"apollo_pat_abc","rateLimit":10,"expires":"2030-01-01T00:00:00Z","dataChangeCreatedTime":"2026-01-01T00:00:00Z","denyAll":false,"allOperations":false,"operations":["config:read"],"allApps":false,"appIds":["demo"],"allEnvs":true,"envs":[],"allNamespaces":true,"namespaces":[],"actions":[{"id":"item.list","method":"GET","path":"/openapi/v1/...","requiredOperations":["config:read"],"grantedOperations":["config:read"],"operationMatch":"ANY","resourceScope":"item","description":"Page items"}]}"#,
+    );
+    let home = temp_home();
+
+    let assert = base_command(&home)
+        .env("APOLLO_TOKEN", "apollo_pat_test_token")
+        .args(["--server", &server.url(), "auth", "capabilities"])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    assert!(stdout.contains("User: alice"));
+    assert!(stdout.contains("Token: local-cli"));
+    assert!(stdout.contains("Operations: config:read"));
+    assert!(stdout.contains("Apps: demo"));
+    assert!(stdout.contains("Actions: 1"));
+    assert!(!stdout.contains("apollo_pat_test_token"));
+
+    assert_eq!(
+        server.request().path,
+        "/openapi/v1/user-tokens/current/capabilities"
+    );
+}
+
+#[test]
+fn auth_self_check_requires_user_token_mode() {
+    let home = temp_home();
+
+    let assert = base_command(&home)
+        .env("APOLLO_TOKEN", "consumer-token")
+        .args([
+            "--server",
+            "http://127.0.0.1:9",
+            "--output",
+            "json",
+            "auth",
+            "whoami",
+        ])
+        .assert()
+        .failure();
+
+    assert!(assert.get_output().stdout.is_empty());
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf8 stderr");
+    let json: Value = serde_json::from_str(&stderr).expect("json stderr");
+    assert_eq!(json["error"]["code"], "invalid_input");
+    assert!(stderr.contains("user-token"));
+}
+
+#[test]
 fn openapi_env_auth_with_explicit_server_ignores_stale_active_profile() {
     let server = TestServer::json(r#"[{"appId":"demo"}]"#);
     let home = temp_home();
@@ -224,6 +389,77 @@ fn mutating_commands_require_yes_before_network_call() {
 }
 
 #[test]
+fn user_token_config_set_does_not_require_or_send_operator() {
+    let server = TestServer::json(r#"{"key":"timeout","value":"3000"}"#);
+    let home = temp_home();
+
+    base_command(&home)
+        .env("APOLLO_TOKEN", "apollo_pat_test_token")
+        .args([
+            "--server",
+            &server.url(),
+            "--output",
+            "json",
+            "--yes",
+            "config",
+            "set",
+            "--env",
+            "DEV",
+            "--app",
+            "demo",
+            "timeout",
+            "3000",
+        ])
+        .assert()
+        .success();
+
+    let request = server.request();
+    assert_eq!(
+        request.path,
+        "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/application/items/timeout?createIfNotExists=true"
+    );
+    let body: Value = serde_json::from_str(&request.body).expect("json body");
+    assert_eq!(body["key"], "timeout");
+    assert_eq!(body["value"], "3000");
+    assert!(body.get("dataChangeCreatedBy").is_none());
+    assert!(body.get("dataChangeLastModifiedBy").is_none());
+}
+
+#[test]
+fn user_token_mutating_command_rejects_explicit_operator() {
+    let home = temp_home();
+
+    let assert = base_command(&home)
+        .env("APOLLO_TOKEN", "apollo_pat_test_token")
+        .args([
+            "--server",
+            "http://127.0.0.1:9",
+            "--output",
+            "json",
+            "--yes",
+            "config",
+            "set",
+            "--env",
+            "DEV",
+            "--app",
+            "demo",
+            "--operator",
+            "apollo-bot",
+            "timeout",
+            "3000",
+        ])
+        .assert()
+        .failure();
+
+    assert!(assert.get_output().stdout.is_empty());
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf8 stderr");
+    let json: Value = serde_json::from_str(&stderr).expect("json stderr");
+    assert_eq!(json["error"]["code"], "invalid_input");
+    assert!(stderr.contains("operator"));
+    assert!(stderr.contains("user-token"));
+}
+
+#[test]
 fn mutating_confirmation_uses_profile_output_before_resolving_credentials() {
     let home = temp_home();
     write_config(
@@ -263,6 +499,68 @@ fn openapi_error_redacts_sensitive_response_body_to_stderr() {
     assert_eq!(json["error"]["code"], "server_error");
     assert!(!stderr.contains("consumer-token"));
     assert!(stderr.contains("[REDACTED]"));
+}
+
+#[test]
+fn user_token_unauthorized_error_includes_actionable_hint() {
+    let server = TestServer::new(401, "text/plain", "Unauthorized user token");
+    let home = temp_home();
+
+    let assert = base_command(&home)
+        .env("APOLLO_TOKEN", "apollo_pat_test_token")
+        .args([
+            "--server",
+            &server.url(),
+            "--output",
+            "json",
+            "api",
+            "get",
+            "/openapi/v1/apps",
+        ])
+        .assert()
+        .failure();
+
+    assert!(assert.get_output().stdout.is_empty());
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf8 stderr");
+    let json: Value = serde_json::from_str(&stderr).expect("json stderr");
+    assert_eq!(json["error"]["code"], "authentication_failed");
+    assert!(stderr.contains("user token"));
+    assert!(stderr.contains("expired"));
+    assert!(!stderr.contains("apollo_pat_test_token"));
+}
+
+#[test]
+fn openapi_client_does_not_follow_auth_redirects() {
+    let server = TestServer::sequence_with_headers(vec![
+        (302, "text/plain", "", vec![("Location", "/signin")]),
+        (200, "text/html", "<html>signin</html>", Vec::new()),
+    ]);
+    let home = temp_home();
+
+    let assert = base_command(&home)
+        .env("APOLLO_TOKEN", "apollo_pat_test_token")
+        .args([
+            "--server",
+            &server.url(),
+            "--output",
+            "json",
+            "auth",
+            "whoami",
+        ])
+        .assert()
+        .failure();
+
+    assert!(assert.get_output().stdout.is_empty());
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf8 stderr");
+    let json: Value = serde_json::from_str(&stderr).expect("json stderr");
+    assert_eq!(json["error"]["code"], "server_error");
+    assert!(stderr.contains("HTTP 302"));
+    assert!(stderr.contains("redirected to /signin"));
+    assert!(stderr.contains("user token authentication failed"));
+    assert!(!stderr.contains("<html>signin</html>"));
+
+    let request = server.request();
+    assert_eq!(request.path, "/openapi/v1/user-tokens/current");
 }
 
 #[test]
@@ -514,6 +812,109 @@ fn namespace_create_with_yes_sends_namespace_instance_payload() {
     assert_eq!(namespace_body[0]["env"], "DEV");
     assert_eq!(namespace_body[0]["clusterName"], "default");
     assert_eq!(namespace_body[0]["appNamespaceName"], "settings.json");
+}
+
+#[test]
+fn namespace_create_treats_apollo_missing_appnamespace_400_as_absent() {
+    let server = TestServer::sequence(vec![
+        (
+            400,
+            "application/json",
+            r#"{"message":"appNamespace not exist for appId:demo namespaceName:settings"}"#,
+        ),
+        (200, "application/json", r#"{"name":"settings"}"#),
+        (200, "application/json", "{}"),
+    ]);
+    let home = temp_home();
+    write_config(
+        &home,
+        &profile_config_with_operator(&server.url(), "apollo-bot"),
+    );
+
+    base_command(&home)
+        .env("APOLLO_TOKEN", "consumer-token")
+        .args([
+            "--yes",
+            "--output",
+            "json",
+            "namespace",
+            "create",
+            "--env",
+            "DEV",
+            "--app",
+            "demo",
+            "settings",
+        ])
+        .assert()
+        .success();
+
+    let requests = server.requests(3);
+    assert_eq!(
+        requests[0].path,
+        "/openapi/v1/apps/demo/appnamespaces/settings"
+    );
+    assert_eq!(requests[1].method, "POST");
+    assert_eq!(requests[1].path, "/openapi/v1/apps/demo/appnamespaces");
+    assert_eq!(requests[2].method, "POST");
+    assert_eq!(
+        requests[2].path,
+        "/openapi/v1/namespaces?operator=apollo-bot"
+    );
+}
+
+#[test]
+fn namespace_create_recovers_when_server_reports_failure_after_creation() {
+    let server = TestServer::sequence(vec![
+        (404, "application/json", r#"{"message":"not found"}"#),
+        (200, "application/json", r#"{"name":"settings"}"#),
+        (
+            400,
+            "application/json",
+            r#"{"message":"create namespace failed for: DEV/default/settings"}"#,
+        ),
+        (
+            200,
+            "application/json",
+            r#"{"namespaceName":"settings","items":[]}"#,
+        ),
+    ]);
+    let home = temp_home();
+    write_config(
+        &home,
+        &profile_config_with_operator(&server.url(), "apollo-bot"),
+    );
+
+    base_command(&home)
+        .env("APOLLO_TOKEN", "consumer-token")
+        .args([
+            "--yes",
+            "--output",
+            "json",
+            "namespace",
+            "create",
+            "--env",
+            "DEV",
+            "--app",
+            "demo",
+            "settings",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""namespaceName": "settings""#));
+
+    let requests = server.requests(4);
+    assert_eq!(requests[0].method, "GET");
+    assert_eq!(requests[1].method, "POST");
+    assert_eq!(requests[2].method, "POST");
+    assert_eq!(
+        requests[2].path,
+        "/openapi/v1/namespaces?operator=apollo-bot"
+    );
+    assert_eq!(requests[3].method, "GET");
+    assert_eq!(
+        requests[3].path,
+        "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/settings"
+    );
 }
 
 #[test]
@@ -822,6 +1223,14 @@ struct TestServer {
     request_rx: Receiver<CapturedRequest>,
 }
 
+type TestResponse = (u16, &'static str, &'static str);
+type TestResponseWithHeaders = (
+    u16,
+    &'static str,
+    &'static str,
+    Vec<(&'static str, &'static str)>,
+);
+
 impl TestServer {
     fn json(body: &'static str) -> Self {
         Self::new(200, "application/json", body)
@@ -835,14 +1244,23 @@ impl TestServer {
         Self::sequence(vec![(status, content_type, body)])
     }
 
-    fn sequence(responses: Vec<(u16, &'static str, &'static str)>) -> Self {
+    fn sequence(responses: Vec<TestResponse>) -> Self {
+        Self::sequence_with_headers(
+            responses
+                .into_iter()
+                .map(|(status, content_type, body)| (status, content_type, body, Vec::new()))
+                .collect(),
+        )
+    }
+
+    fn sequence_with_headers(responses: Vec<TestResponseWithHeaders>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
         let addr = listener.local_addr().expect("local addr");
         let (request_tx, request_rx) = mpsc::channel();
         thread::spawn(move || {
-            for (status, content_type, body) in responses {
+            for (status, content_type, body, response_headers) in responses {
                 let (stream, _) = listener.accept().expect("accept request");
-                let request = read_request(stream, status, content_type, body);
+                let request = read_request(stream, status, content_type, body, &response_headers);
                 request_tx.send(request).expect("send captured request");
             }
         });
@@ -875,6 +1293,7 @@ fn read_request(
     status: u16,
     content_type: &str,
     response_body: &str,
+    response_headers: &[(&str, &str)],
 ) -> CapturedRequest {
     let mut buffer = Vec::new();
     let mut chunk = [0_u8; 1024];
@@ -898,10 +1317,15 @@ fn read_request(
     let path = parts.next().expect("path").to_owned();
     let headers = lines.map(ToOwned::to_owned).collect();
 
+    let extra_headers = response_headers
+        .iter()
+        .map(|(name, value)| format!("{name}: {value}\r\n"))
+        .collect::<String>();
     let response = format!(
-        "HTTP/1.1 {} OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "HTTP/1.1 {} OK\r\nContent-Type: {}\r\n{}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
         status,
         content_type,
+        extra_headers,
         response_body.len(),
         response_body
     );
@@ -961,6 +1385,19 @@ fn config_path(home: &TempDir) -> PathBuf {
     config_root(home).join("apollo").join("config.toml")
 }
 
+fn credential_file_path(home: &TempDir, key: &str) -> PathBuf {
+    config_root(home)
+        .join("apollo")
+        .join("credentials")
+        .join(format!("{}.token", key))
+}
+
+fn write_file_credential(home: &TempDir, key: &str, token: &str) {
+    let path = credential_file_path(home, key);
+    fs::create_dir_all(path.parent().expect("credential parent")).expect("credential dir");
+    fs::write(path, token).expect("credential file");
+}
+
 fn config_root(home: &TempDir) -> PathBuf {
     if cfg!(target_os = "macos") {
         home.path().join("Library").join("Application Support")
@@ -1006,6 +1443,24 @@ output = "table"
 operator = "{}"
 "#,
         server, operator
+    )
+}
+
+fn profile_config_with_auth_mode(server: &str, auth_mode: &str) -> String {
+    format!(
+        r#"
+active_profile = "dev"
+
+[profiles.dev]
+server = "{}"
+output = "table"
+auth_mode = "{}"
+
+[profiles.dev.credential]
+backend = "file"
+key = "dev"
+"#,
+        server, auth_mode
     )
 }
 

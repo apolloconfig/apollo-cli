@@ -78,7 +78,9 @@ The current scaffold parses these global flags before subcommands:
 ## Guided setup
 
 Use `apollo init` for first-time setup. It creates a profile, writes non-secret profile metadata to
-`config.toml`, and can store a Consumer token through the credential-store abstraction.
+`config.toml`, and can store an Apollo OpenAPI token through the credential-store abstraction.
+For Apollo versions with Portal user access tokens, user-token auth is the recommended mode for
+interactive users, AI agents, and personal automation.
 
 For local Apollo assembly testing:
 
@@ -92,7 +94,8 @@ By default, `apollo init` creates a `local` profile with:
 
 - `server = "http://127.0.0.1:8070"`
 - no persisted `output` unless `--output` is passed
-- `operator = "apollo"`
+- `auth_mode = "user-token"`
+- no `operator`; user-token OpenAPI requests use the token owner as the operator
 - `active_profile = "local"`
 
 Use `apollo profile add` to add more environments without hand-editing config:
@@ -102,10 +105,10 @@ printf '%s\n' "$DEV_TOKEN" | apollo \
   --server https://apollo-dev.example.com \
   --output json \
   profile add dev \
-  --operator alice \
   --token-stdin
 
-apollo profile add prod --server https://apollo-prod.example.com --operator alice --use
+apollo profile add prod --server https://apollo-prod.example.com --use
+apollo profile add legacy --server https://apollo-legacy.example.com --auth-mode consumer-token --operator alice
 ```
 
 `profile add` does not switch the active profile by default. Pass `--use` when the newly added
@@ -126,11 +129,15 @@ The config file stores:
 - profile name
 - profile `server`
 - profile `output`
+- profile `auth_mode`, either `user-token` or `consumer-token`
 - optional `operator`
 - optional credential lookup metadata, such as backend/key names
 
 Tokens are intentionally not part of the supported config schema. Prefer `apollo init`,
 `apollo profile add`, and `apollo auth login` over editing this file by hand.
+
+If `auth_mode` is missing, the CLI treats the profile as `consumer-token` for backward
+compatibility with existing configs.
 
 Example:
 
@@ -140,7 +147,7 @@ active_profile = "dev"
 [profiles.dev]
 server = "https://apollo-dev.example.com"
 output = "table"
-operator = "apollo-bot"
+auth_mode = "user-token"
 
 [profiles.dev.credential]
 backend = "native"
@@ -168,6 +175,8 @@ Runtime context resolution follows this order:
 - `apollo auth login --token-stdin`
 - `apollo auth login --token-stdin --store-token-in-file`
 - `apollo auth status`
+- `apollo auth whoami`
+- `apollo auth capabilities`
 - `apollo auth logout`
 
 Credential storage uses an internal store abstraction with these logical providers:
@@ -186,14 +195,25 @@ Native backend selection follows the OS behavior of the underlying credential st
 
 File fallback writes token material outside `config.toml` under the CLI credentials directory and uses restrictive file permissions on Unix. The profile config stores only non-secret credential lookup metadata.
 
-OpenAPI commands authenticate with the existing Apollo Consumer token model. The CLI sends the
-token as the `Authorization` header value expected by Apollo Portal OpenAPI.
+OpenAPI commands support two token modes:
+
+- `user-token`: recommended for interactive users, AI agents, and local automation. Tokens start
+  with `apollo_pat_` and are sent as `Authorization: Bearer <token>`.
+- `consumer-token`: compatibility mode for existing integrations and older Apollo deployments.
+  Tokens are sent as the raw `Authorization: <token>` header value.
+
+`apollo init` and `apollo profile add` default to `user-token`. Use `--auth-mode consumer-token`
+when configuring legacy consumer-token credentials. Mutating commands require a configured
+`operator` only in `consumer-token` mode; user-token requests use the owning Portal user.
 
 For local or CI use, `APOLLO_TOKEN` takes precedence and is never written to disk:
 
 ```bash
 APOLLO_TOKEN="$TOKEN" apollo --server http://localhost:8070 app list --output json
 ```
+
+When `APOLLO_TOKEN` starts with `apollo_pat_`, the CLI automatically treats it as `user-token`;
+otherwise it uses `consumer-token` compatibility mode.
 
 `apollo auth logout` removes the credential referenced by the selected profile. It cannot remove
 `APOLLO_TOKEN` from the parent shell environment. When `APOLLO_TOKEN` is still set, logout reports
@@ -215,7 +235,19 @@ For scripts or manual paste-with-enter workflows, `--token-stdin` reads one toke
 ```bash
 printf '%s\n' "$TOKEN" | apollo --profile dev auth login --token-stdin
 apollo --profile dev auth login --token-stdin
+printf '%s\n' "$LEGACY_CONSUMER_TOKEN" | apollo --profile legacy auth login --auth-mode consumer-token --token-stdin
 ```
+
+Use user-token self-check commands after login:
+
+```bash
+apollo --profile dev auth whoami
+apollo --profile dev auth capabilities
+```
+
+These commands call `/openapi/v1/user-tokens/current` and
+`/openapi/v1/user-tokens/current/capabilities`. They require `user-token` auth mode and do not
+create, rotate, or revoke tokens; user token creation remains a Portal self-service flow.
 
 ## Redaction and Errors
 
@@ -295,6 +327,7 @@ If you have a local Apollo Portal running, you can also smoke-test against it:
 ```bash
 APOLLO_TOKEN="$TOKEN" cargo run -- --server http://localhost:8070 --output json env list --app sample-app
 APOLLO_TOKEN="$TOKEN" cargo run -- --server http://localhost:8070 --output json app list
+APOLLO_TOKEN="$USER_TOKEN" cargo run -- --server http://localhost:8070 --output json auth whoami
 ```
 
 Format the repository:

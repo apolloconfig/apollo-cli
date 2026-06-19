@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::cli::{Cli, OutputFormat};
+use crate::cli::{AuthMode, Cli, OutputFormat};
 use crate::error::CliError;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -20,8 +20,15 @@ pub struct AppConfig {
 pub struct ProfileConfig {
     pub server: Option<String>,
     pub output: Option<OutputFormat>,
+    pub auth_mode: Option<AuthMode>,
     pub operator: Option<String>,
     pub credential: Option<CredentialRef>,
+}
+
+impl ProfileConfig {
+    pub fn resolved_auth_mode(&self) -> AuthMode {
+        self.auth_mode.unwrap_or_default()
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -41,6 +48,7 @@ pub struct RuntimeContext {
     pub profile: Option<String>,
     pub server: Option<String>,
     pub output: OutputFormat,
+    pub auth_mode: AuthMode,
     pub operator: Option<String>,
     pub credential: Option<CredentialRef>,
 }
@@ -102,24 +110,33 @@ pub fn resolve_context(
     let (selected_profile, profile_config) = selected_profile_and_config(cli, loaded, format)?;
     let output = resolve_output(cli, loaded, format)?;
 
+    let server = cli
+        .global
+        .server
+        .clone()
+        .and_then(non_blank)
+        .or_else(|| env_var_non_blank("APOLLO_SERVER"))
+        .or_else(|| {
+            profile_config
+                .as_ref()
+                .and_then(|profile| profile.server.clone().and_then(non_blank))
+        });
+    let auth_mode = profile_config
+        .as_ref()
+        .map(ProfileConfig::resolved_auth_mode)
+        .unwrap_or_default();
+    let operator = profile_config
+        .as_ref()
+        .and_then(|profile| profile.operator.clone().and_then(non_blank));
+    let credential = profile_config.and_then(|profile| profile.credential);
+
     Ok(RuntimeContext {
         profile: selected_profile,
-        server: cli
-            .global
-            .server
-            .clone()
-            .and_then(non_blank)
-            .or_else(|| env_var_non_blank("APOLLO_SERVER"))
-            .or_else(|| {
-                profile_config
-                    .as_ref()
-                    .and_then(|profile| profile.server.clone().and_then(non_blank))
-            }),
+        server,
         output,
-        operator: profile_config
-            .as_ref()
-            .and_then(|profile| profile.operator.clone().and_then(non_blank)),
-        credential: profile_config.and_then(|profile| profile.credential),
+        auth_mode,
+        operator,
+        credential,
     })
 }
 
@@ -263,7 +280,7 @@ mod tests {
     use std::ffi::OsString;
     use std::path::PathBuf;
 
-    use super::{Platform, config_path_for_platform};
+    use super::{AppConfig, Platform, config_path_for_platform};
 
     #[test]
     fn config_path_uses_macos_convention() {
@@ -345,5 +362,38 @@ mod tests {
         let vars = HashMap::from([(String::from("APPDATA"), OsString::from(""))]);
         let error = config_path_for_platform(Platform::Windows, &vars).expect_err("appdata");
         assert_eq!(error, "APPDATA is not set");
+    }
+
+    #[test]
+    fn profile_auth_mode_round_trips_as_kebab_case() {
+        let config: AppConfig = toml::from_str(
+            r#"
+[profiles.dev]
+server = "https://apollo.example.com"
+auth_mode = "user-token"
+"#,
+        )
+        .expect("parse config");
+
+        let profile = config.profiles.get("dev").expect("profile");
+        assert_eq!(profile.auth_mode.expect("auth mode").as_str(), "user-token");
+
+        let body = toml::to_string_pretty(&config).expect("serialize config");
+        assert!(body.contains("auth_mode = \"user-token\""));
+    }
+
+    #[test]
+    fn missing_profile_auth_mode_resolves_as_consumer_token() {
+        let config: AppConfig = toml::from_str(
+            r#"
+[profiles.dev]
+server = "https://apollo.example.com"
+"#,
+        )
+        .expect("parse config");
+
+        let profile = config.profiles.get("dev").expect("profile");
+        assert!(profile.auth_mode.is_none());
+        assert_eq!(profile.resolved_auth_mode().as_str(), "consumer-token");
     }
 }

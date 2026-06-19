@@ -222,6 +222,121 @@ server = "https://apollo-dev.example.com"
     assert!(!config.contains("secret-from-stdin"));
 }
 
+#[test]
+fn auth_login_auto_detects_user_token_mode_from_prefix() {
+    let home = temp_home();
+    write_config(
+        &home,
+        r#"
+active_profile = "dev"
+
+[profiles.dev]
+server = "https://apollo-dev.example.com"
+"#,
+    );
+
+    let assert = base_command(&home)
+        .write_stdin("apollo_pat_test_token\n")
+        .args([
+            "--output",
+            "json",
+            "auth",
+            "login",
+            "--token-stdin",
+            "--store-token-in-file",
+        ])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let json: Value = serde_json::from_str(&stdout).expect("json stdout");
+
+    assert_eq!(json["stored"], true);
+    assert_eq!(json["authMode"], "user-token");
+    assert!(!stdout.contains("apollo_pat_test_token"));
+
+    let config = fs::read_to_string(config_path(&home)).expect("config");
+    assert!(config.contains("auth_mode = \"user-token\""));
+    assert!(config.contains("backend = \"file\""));
+    assert!(!config.contains("apollo_pat_test_token"));
+}
+
+#[test]
+fn auth_login_rejects_explicit_user_token_mode_with_consumer_token_value() {
+    let home = temp_home();
+    write_config(
+        &home,
+        r#"
+active_profile = "dev"
+
+[profiles.dev]
+server = "https://apollo-dev.example.com"
+"#,
+    );
+
+    let assert = base_command(&home)
+        .write_stdin("consumer-token\n")
+        .args([
+            "--output",
+            "json",
+            "auth",
+            "login",
+            "--auth-mode",
+            "user-token",
+            "--token-stdin",
+            "--store-token-in-file",
+        ])
+        .assert()
+        .failure();
+
+    assert!(assert.get_output().stdout.is_empty());
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf8 stderr");
+    let json: Value = serde_json::from_str(&stderr).expect("json stderr");
+
+    assert_eq!(json["error"]["code"], "invalid_input");
+    assert!(stderr.contains("apollo_pat_"));
+    assert!(!stderr.contains("consumer-token"));
+    assert!(!credential_file_path(&home, "dev").exists());
+}
+
+#[test]
+fn auth_login_rejects_explicit_consumer_token_mode_with_user_token_value() {
+    let home = temp_home();
+    write_config(
+        &home,
+        r#"
+active_profile = "dev"
+
+[profiles.dev]
+server = "https://apollo-dev.example.com"
+"#,
+    );
+
+    let assert = base_command(&home)
+        .write_stdin("apollo_pat_test_token\n")
+        .args([
+            "--output",
+            "json",
+            "auth",
+            "login",
+            "--auth-mode",
+            "consumer-token",
+            "--token-stdin",
+            "--store-token-in-file",
+        ])
+        .assert()
+        .failure();
+
+    assert!(assert.get_output().stdout.is_empty());
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf8 stderr");
+    let json: Value = serde_json::from_str(&stderr).expect("json stderr");
+
+    assert_eq!(json["error"]["code"], "invalid_input");
+    assert!(stderr.contains("consumer-token"));
+    assert!(!stderr.contains("apollo_pat_test_token"));
+    assert!(!credential_file_path(&home, "dev").exists());
+}
+
 #[cfg(unix)]
 #[test]
 fn auth_login_tightens_existing_file_credential_permissions() {

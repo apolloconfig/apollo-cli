@@ -61,7 +61,7 @@ impl CredentialStore for NativeCredentialStore {
         if native_disabled_for_tests() {
             return Err("native credential store disabled".to_owned());
         }
-        let entry = Entry::new(SERVICE_NAME, key).map_err(|error| error.to_string())?;
+        let entry = native_entry(key)?;
         match entry.get_password() {
             Ok(token) => Ok(Some(Sensitive::new(token))),
             Err(keyring::Error::NoEntry) => Ok(None),
@@ -73,7 +73,7 @@ impl CredentialStore for NativeCredentialStore {
         if native_disabled_for_tests() {
             return Err("native credential store disabled".to_owned());
         }
-        let entry = Entry::new(SERVICE_NAME, key).map_err(|error| error.to_string())?;
+        let entry = native_entry(key)?;
         entry
             .set_password(token.expose_secret())
             .map_err(|error| error.to_string())
@@ -83,12 +83,32 @@ impl CredentialStore for NativeCredentialStore {
         if native_disabled_for_tests() {
             return Err("native credential store disabled".to_owned());
         }
-        let entry = Entry::new(SERVICE_NAME, key).map_err(|error| error.to_string())?;
+        let entry = native_entry(key)?;
         match entry.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
             Err(error) => Err(error.to_string()),
         }
     }
+}
+
+fn native_entry(key: &str) -> Result<Entry, String> {
+    let entry = Entry::new(SERVICE_NAME, key).map_err(|error| error.to_string())?;
+    ensure_native_backend(&entry)?;
+    Ok(entry)
+}
+
+fn ensure_native_backend(entry: &Entry) -> Result<(), String> {
+    if native_backend_is_mock(entry) {
+        return Err(
+            "native credential storage is unavailable because this build is using keyring's non-persistent mock backend; rebuild with a platform keyring feature or re-run with --store-token-in-file"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
+fn native_backend_is_mock(entry: &Entry) -> bool {
+    entry.get_credential().is::<keyring::mock::MockCredential>()
 }
 
 pub struct FileCredentialStore {
@@ -292,7 +312,7 @@ pub fn token_from_login_input(
 }
 
 pub fn prompt_token(format: crate::cli::OutputFormat) -> Result<Sensitive, CliError> {
-    let token = prompt_hidden("Consumer token: ", format)?;
+    let token = prompt_hidden("Apollo token: ", format)?;
     token_from_value(token, format)
 }
 
@@ -484,6 +504,31 @@ mod tests {
 
         store.delete("dev").expect("delete token");
         assert!(store.get("dev").expect("get after delete").is_none());
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    fn keyring_default_backend_is_not_mock_on_supported_platforms() {
+        let entry = keyring::Entry::new(super::SERVICE_NAME, "__apollo_cli_backend_probe__")
+            .expect("entry");
+
+        assert!(
+            !super::native_backend_is_mock(&entry),
+            "keyring native backend must use the platform credential store, not the non-persistent mock backend"
+        );
+    }
+
+    #[test]
+    fn native_backend_guard_rejects_keyring_mock() {
+        let credential = keyring::mock::default_credential_builder()
+            .build(None, super::SERVICE_NAME, "__apollo_cli_mock_probe__")
+            .expect("mock credential");
+        let entry = keyring::Entry::new_with_credential(credential);
+
+        let error = super::ensure_native_backend(&entry).expect_err("mock backend should fail");
+
+        assert!(error.contains("non-persistent mock backend"));
+        assert!(error.contains("--store-token-in-file"));
     }
 
     #[test]

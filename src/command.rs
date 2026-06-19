@@ -5,8 +5,9 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::cli::{
-    ApiArgs, AppCommand, AuthCommand, Cli, Commands, ConfigCommand, EnvCommand, InitArgs,
+    ApiArgs, AppCommand, AuthCommand, AuthMode, Cli, Commands, ConfigCommand, EnvCommand, InitArgs,
     NamespaceCommand, NamespaceScopeArgs, OutputFormat, ProfileCommand, ReleaseCommand,
+    USER_TOKEN_PREFIX,
 };
 use crate::config::{
     CredentialRef, LoadedConfig, ProfileConfig, RuntimeContext, load_config, read_env_output,
@@ -58,6 +59,7 @@ fn execute_init(
     let options = ProfileSetupOptions {
         mode: ProfileSetupMode::Init,
         name: args.name,
+        auth_mode: args.auth_mode,
         operator: args.operator,
         token_stdin: args.token_stdin,
         store_token_in_file: args.store_token_in_file,
@@ -97,6 +99,12 @@ fn execute_auth(
                     authenticated: true,
                     source: "env".to_owned(),
                     profile,
+                    auth_mode: Some(
+                        AuthMode::from_token_value(
+                            &std::env::var("APOLLO_TOKEN").unwrap_or_default(),
+                        )
+                        .to_string(),
+                    ),
                     backend: Some("env".to_owned()),
                     key: Some("APOLLO_TOKEN".to_owned()),
                 };
@@ -113,12 +121,14 @@ fn execute_auth(
                 authenticated: status.authenticated,
                 source: status.source.as_str().to_owned(),
                 profile: Some(profile),
+                auth_mode: Some(context.auth_mode.to_string()),
                 backend: status.backend,
                 key: status.key,
             };
             Ok(writer.render_success(&response, response.render_table()))
         }
         AuthCommand::Login {
+            auth_mode,
             token_stdin,
             store_token_in_file,
         } => {
@@ -131,6 +141,18 @@ fn execute_auth(
                 return Err(CliError::profile_not_found(&profile, writer_output));
             }
             let token = credential::token_from_login_input(token_stdin, writer_output)?;
+            let existing_auth_mode = loaded
+                .config
+                .profiles
+                .get(&profile)
+                .and_then(|profile| profile.auth_mode);
+            let auth_mode = resolve_auth_mode(
+                auth_mode,
+                Some(&token),
+                existing_auth_mode,
+                AuthMode::UserToken,
+                writer_output,
+            )?;
 
             let credential_ref = store_setup_token(
                 &loaded.path,
@@ -146,16 +168,24 @@ fn execute_auth(
                 .profiles
                 .get_mut(&profile)
                 .ok_or_else(|| CliError::profile_not_found(&profile, writer_output))?;
+            profile_config.auth_mode = Some(auth_mode);
             profile_config.credential = Some(credential_ref.clone());
             save_config(&loaded.path, &config, writer_output)?;
 
             let response = AuthLoginResponse {
                 stored: true,
                 profile: profile.clone(),
+                auth_mode: auth_mode.to_string(),
                 backend: credential_ref.backend,
                 key: credential_ref.key,
             };
             Ok(writer.render_success(&response, response.render_table()))
+        }
+        AuthCommand::Whoami => {
+            execute_auth_self_check(cli, output, "/openapi/v1/user-tokens/current")
+        }
+        AuthCommand::Capabilities => {
+            execute_auth_self_check(cli, output, "/openapi/v1/user-tokens/current/capabilities")
         }
         AuthCommand::Logout => {
             let loaded = load_config(output)?;
@@ -205,6 +235,7 @@ fn execute_profile(
             let options = ProfileSetupOptions {
                 mode: ProfileSetupMode::Add,
                 name: args.name,
+                auth_mode: args.auth_mode,
                 operator: args.operator,
                 token_stdin: args.token_stdin,
                 store_token_in_file: args.store_token_in_file,
@@ -272,6 +303,7 @@ impl ProfileSetupMode {
 struct ProfileSetupOptions {
     mode: ProfileSetupMode,
     name: Option<String>,
+    auth_mode: Option<AuthMode>,
     operator: Option<String>,
     token_stdin: bool,
     store_token_in_file: bool,
@@ -302,22 +334,32 @@ fn execute_profile_setup(
     let server = resolve_setup_server(&options, cli, interactive, writer_output)?;
     let profile_output = cli.global.output;
     let response_output = profile_output.unwrap_or(OutputFormat::Table);
-    let operator = resolve_setup_operator(&options, interactive, writer_output)?;
     let existing_profile = loaded.config.profiles.get(&profile_name);
+    let setup_token = resolve_setup_token(&options, interactive, writer_output)?;
+    let auth_mode = resolve_auth_mode(
+        options.auth_mode,
+        setup_token.as_ref(),
+        existing_profile.map(ProfileConfig::resolved_auth_mode),
+        AuthMode::UserToken,
+        writer_output,
+    )?;
+    let operator = resolve_setup_operator(&options, auth_mode, interactive, writer_output)?;
 
     let mut profile_config = ProfileConfig {
         server: Some(server.clone()),
         output: profile_output,
+        auth_mode: Some(auth_mode),
         operator: operator.clone(),
         credential: existing_profile.and_then(|profile| profile.credential.clone()),
     };
 
-    let credential = resolve_setup_token(&options, interactive, writer_output)?
+    let credential = setup_token
+        .as_ref()
         .map(|token| {
             store_setup_token(
                 &loaded.path,
                 &profile_name,
-                &token,
+                token,
                 options.store_token_in_file,
                 interactive,
                 writer_output,
@@ -345,6 +387,7 @@ fn execute_profile_setup(
         active_profile: config.active_profile.clone(),
         server,
         output: response_output.to_string(),
+        auth_mode: auth_mode.to_string(),
         operator,
         credential: response_credential,
         config_path: loaded.path.display().to_string(),
@@ -417,21 +460,46 @@ fn execute_namespace(
             operator,
             public_namespace,
         } => {
-            let operator = required_operator(
+            let operator = operator_for_mutation(
                 operator.as_deref(),
                 &openapi.context,
                 openapi.context.output,
             )?;
-            let app_namespace_name =
-                register_app_namespace(&openapi, &scope.app, &name, public_namespace, &operator)?;
-            let path = append_query("/openapi/v1/namespaces".to_owned(), "operator", &operator);
+            let app_namespace_name = register_app_namespace(
+                &openapi,
+                &scope.app,
+                &name,
+                public_namespace,
+                operator.as_deref(),
+            )?;
+            let path = append_optional_query(
+                "/openapi/v1/namespaces".to_owned(),
+                "operator",
+                operator.as_deref(),
+            );
             let body = json!([{
-                "appId": scope.app,
-                "env": scope.env,
-                "clusterName": scope.cluster,
-                "appNamespaceName": app_namespace_name,
+                "appId": &scope.app,
+                "env": &scope.env,
+                "clusterName": &scope.cluster,
+                "appNamespaceName": &app_namespace_name,
             }]);
-            openapi.request("POST", &path, Some(body))
+            match openapi.request("POST", &path, Some(body)) {
+                Ok(output) => Ok(output),
+                Err(error) if is_namespace_create_reported_failed(&error) => {
+                    let namespace_scope = NamespaceScopeArgs {
+                        cluster_scope: scope,
+                        namespace: app_namespace_name,
+                    };
+                    match openapi
+                        .client
+                        .request("GET", &namespace_path(&namespace_scope), None)
+                    {
+                        Ok(response) => Ok(render_openapi_response(&openapi.writer, &response)),
+                        Err(_) => Err(error),
+                    }
+                }
+                Err(error) => Err(error),
+            }
         }
     }
 }
@@ -446,7 +514,7 @@ fn register_app_namespace(
     app_id: &str,
     namespace_name: &str,
     public_namespace: bool,
-    operator: &str,
+    operator: Option<&str>,
 ) -> Result<String, CliError> {
     if let Some(existing_name) = find_app_namespace(openapi, app_id, namespace_name)? {
         return Ok(existing_name);
@@ -457,13 +525,15 @@ fn register_app_namespace(
         "/openapi/v1/apps/{}/appnamespaces",
         encode_path_segment(app_id)
     );
-    let body = json!({
+    let mut body = json!({
         "appId": app_id,
         "name": registration.name,
         "format": registration.format,
         "isPublic": public_namespace,
-        "dataChangeCreatedBy": operator,
     });
+    if let Some(operator) = operator {
+        body["dataChangeCreatedBy"] = json!(operator);
+    }
     let response = openapi.client.request("POST", &path, Some(body))?;
     Ok(response
         .data
@@ -492,9 +562,24 @@ fn find_app_namespace(
                 .unwrap_or(namespace_name)
                 .to_owned(),
         )),
-        Err(error) if error.http_status_code() == Some(404) => Ok(None),
+        Err(error) if is_missing_app_namespace(&error) => Ok(None),
         Err(error) => Err(error),
     }
+}
+
+fn is_missing_app_namespace(error: &CliError) -> bool {
+    matches!(error.http_status_code(), Some(404))
+        || (matches!(error.http_status_code(), Some(400))
+            && error
+                .http_status_message()
+                .is_some_and(|message| message.contains("appNamespace not exist")))
+}
+
+fn is_namespace_create_reported_failed(error: &CliError) -> bool {
+    matches!(error.http_status_code(), Some(400))
+        && error
+            .http_status_message()
+            .is_some_and(|message| message.contains("create namespace failed for"))
 }
 
 fn app_namespace_registration(namespace_name: &str) -> AppNamespaceRegistration {
@@ -542,24 +627,25 @@ fn execute_config(
             comment,
             operator,
         } => {
-            let operator = required_operator(
+            let operator = operator_for_mutation(
                 operator.as_deref(),
                 &openapi.context,
                 openapi.context.output,
             )?;
             let update_path = append_query(item_path(&scope, &key), "createIfNotExists", "true");
-            let create_path = append_query(
+            let create_path = append_optional_query(
                 format!("{}/items", namespace_path(&scope)),
                 "operator",
-                &operator,
+                operator.as_deref(),
             );
-            let body = json!({
+            let mut body = json!({
                 "key": key,
                 "value": value,
-                "dataChangeCreatedBy": operator,
-                "dataChangeLastModifiedBy": operator,
             });
-            let mut body = body;
+            if let Some(operator) = &operator {
+                body["dataChangeCreatedBy"] = json!(operator);
+                body["dataChangeLastModifiedBy"] = json!(operator);
+            }
             if let Some(comment) = comment {
                 body["comment"] = json!(comment);
             }
@@ -580,12 +666,13 @@ fn execute_config(
             key,
             operator,
         } => {
-            let operator = required_operator(
+            let operator = operator_for_mutation(
                 operator.as_deref(),
                 &openapi.context,
                 openapi.context.output,
             )?;
-            let path = append_query(item_path(&scope, &key), "operator", &operator);
+            let path =
+                append_optional_query(item_path(&scope, &key), "operator", operator.as_deref());
             openapi.request("DELETE", &path, None)
         }
         ConfigCommand::Diff {
@@ -612,7 +699,7 @@ fn execute_config(
             target_namespace,
             operator,
         } => {
-            let operator = required_operator(
+            let operator = operator_for_mutation(
                 operator.as_deref(),
                 &openapi.context,
                 openapi.context.output,
@@ -633,10 +720,10 @@ fn execute_config(
                 target_namespace,
                 sync_items,
             );
-            let path = append_query(
+            let path = append_optional_query(
                 format!("{}/items/synchronize", namespace_path(&scope)),
                 "operator",
-                &operator,
+                operator.as_deref(),
             );
             openapi.request("POST", &path, Some(body))
         }
@@ -666,18 +753,20 @@ fn execute_release(
             emergency,
             operator,
         } => {
-            let operator = required_operator(
+            let operator = operator_for_mutation(
                 operator.as_deref(),
                 &openapi.context,
                 openapi.context.output,
             )?;
             let path = format!("{}/releases", namespace_path(&scope));
-            let body = json!({
+            let mut body = json!({
                 "releaseTitle": title,
                 "releaseComment": comment.unwrap_or_default(),
-                "releasedBy": operator,
                 "isEmergencyPublish": emergency,
             });
+            if let Some(operator) = operator {
+                body["releasedBy"] = json!(operator);
+            }
             openapi.request("POST", &path, Some(body))
         }
         ReleaseCommand::Rollback {
@@ -686,19 +775,19 @@ fn execute_release(
             to_release_id,
             operator,
         } => {
-            let operator = required_operator(
+            let operator = operator_for_mutation(
                 operator.as_deref(),
                 &openapi.context,
                 openapi.context.output,
             )?;
-            let mut path = append_query(
+            let mut path = append_optional_query(
                 format!(
                     "/openapi/v1/envs/{}/releases/{}/rollback",
                     encode_path_segment(&env),
                     release_id
                 ),
                 "operator",
-                &operator,
+                operator.as_deref(),
             );
             if let Some(to_release_id) = to_release_id {
                 path = append_query(path, "toReleaseId", &to_release_id.to_string());
@@ -720,6 +809,123 @@ fn execute_api(args: ApiArgs, cli: &Cli, output: OutputFormat) -> Result<Rendere
         None => None,
     };
     openapi.request(args.method.as_str(), &args.path, body)
+}
+
+fn execute_auth_self_check(
+    cli: &Cli,
+    output: OutputFormat,
+    path: &str,
+) -> Result<RenderedOutput, CliError> {
+    let openapi = openapi_context(cli, output)?;
+    if !openapi.context.auth_mode.is_user_token() {
+        return Err(CliError::invalid_input(
+            "auth whoami and auth capabilities require user-token auth mode; use a Portal user access token starting with apollo_pat_",
+            openapi.context.output,
+        ));
+    }
+    let response = openapi.client.request("GET", path, None)?;
+    Ok(openapi
+        .writer
+        .render_success(&response, render_user_token_current_table(&response.data)))
+}
+
+fn render_user_token_current_table(data: &Value) -> String {
+    let user = data
+        .get("userId")
+        .and_then(Value::as_str)
+        .unwrap_or("<unknown>");
+    let token_name = data
+        .get("tokenName")
+        .and_then(Value::as_str)
+        .unwrap_or("<unnamed>");
+    let token_prefix = data
+        .get("tokenPrefix")
+        .and_then(Value::as_str)
+        .unwrap_or("<unknown>");
+    let expires = data
+        .get("expires")
+        .and_then(Value::as_str)
+        .unwrap_or("<unknown>");
+    let action_count = data
+        .get("actions")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+
+    [
+        format!("User: {}", user),
+        format!("Token: {} ({})", token_name, token_prefix),
+        format!("Expires: {}", expires),
+        format!(
+            "Operations: {}",
+            render_scope(data, "allOperations", "operations")
+        ),
+        format!("Apps: {}", render_scope(data, "allApps", "appIds")),
+        format!("Envs: {}", render_scope(data, "allEnvs", "envs")),
+        format!(
+            "Namespaces: {}",
+            render_namespace_scope(data.get("allNamespaces"), data.get("namespaces"))
+        ),
+        format!("Actions: {}", action_count),
+    ]
+    .join("\n")
+}
+
+fn render_scope(data: &Value, all_key: &str, list_key: &str) -> String {
+    if data.get(all_key).and_then(Value::as_bool).unwrap_or(false) {
+        return "<all>".to_owned();
+    }
+    let values = data
+        .get(list_key)
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if values.is_empty() {
+        "<none>".to_owned()
+    } else {
+        values.join(", ")
+    }
+}
+
+fn render_namespace_scope(all_value: Option<&Value>, namespaces: Option<&Value>) -> String {
+    if all_value.and_then(Value::as_bool).unwrap_or(false) {
+        return "<all>".to_owned();
+    }
+    let values = namespaces
+        .and_then(Value::as_array)
+        .map(|namespaces| {
+            namespaces
+                .iter()
+                .map(|namespace| {
+                    let app = namespace
+                        .get("appId")
+                        .and_then(Value::as_str)
+                        .unwrap_or("*");
+                    let env = namespace.get("env").and_then(Value::as_str).unwrap_or("*");
+                    let cluster = namespace
+                        .get("clusterName")
+                        .and_then(Value::as_str)
+                        .unwrap_or("*");
+                    let name = namespace
+                        .get("namespaceName")
+                        .and_then(Value::as_str)
+                        .unwrap_or("*");
+                    format!("{}/{}/{}/{}", app, env, cluster, name)
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if values.is_empty() {
+        "<none>".to_owned()
+    } else {
+        values.join(", ")
+    }
 }
 
 struct OpenApiCommandContext {
@@ -756,7 +962,7 @@ fn openapi_context(cli: &Cli, output: OutputFormat) -> Result<OpenApiCommandCont
     }
 
     let writer_output = resolve_output(cli, &loaded, output)?;
-    let context = resolve_context(cli, &loaded, writer_output)?;
+    let mut context = resolve_context(cli, &loaded, writer_output)?;
     let server = required_server(&context, writer_output)?;
     let token = credential::resolve_token(
         &loaded.path,
@@ -770,10 +976,16 @@ fn openapi_context(cli: &Cli, output: OutputFormat) -> Result<OpenApiCommandCont
             writer_output,
         )
     })?;
+    let auth_mode = if env_token_is_set() {
+        AuthMode::from_token_value(token.expose_secret())
+    } else {
+        context.auth_mode
+    };
+    context.auth_mode = auth_mode;
     Ok(OpenApiCommandContext {
         context,
         writer: OutputWriter::new(writer_output),
-        client: OpenApiClient::new(server, token, writer_output),
+        client: OpenApiClient::new(server, token, auth_mode, writer_output),
     })
 }
 
@@ -799,6 +1011,7 @@ fn env_openapi_context(
                 writer_output,
             )
         })?;
+    let auth_mode = AuthMode::from_token_value(token.expose_secret());
     let selected_profile = cli
         .global
         .profile
@@ -815,6 +1028,7 @@ fn env_openapi_context(
         profile: selected_profile,
         server: Some(server.clone()),
         output: writer_output,
+        auth_mode,
         operator,
         credential: None,
     };
@@ -822,7 +1036,7 @@ fn env_openapi_context(
     Ok(Some(OpenApiCommandContext {
         context,
         writer: OutputWriter::new(writer_output),
-        client: OpenApiClient::new(server, token, writer_output),
+        client: OpenApiClient::new(server, token, auth_mode, writer_output),
     }))
 }
 
@@ -845,6 +1059,7 @@ fn env_only_openapi_context(
                 writer_output,
             )
         })?;
+    let auth_mode = AuthMode::from_token_value(token.expose_secret());
     let selected_profile = cli
         .global
         .profile
@@ -855,13 +1070,14 @@ fn env_only_openapi_context(
         profile: selected_profile,
         server: Some(server.clone()),
         output: writer_output,
+        auth_mode,
         operator: None,
         credential: None,
     };
     Ok(OpenApiCommandContext {
         context,
         writer: OutputWriter::new(writer_output),
-        client: OpenApiClient::new(server, token, writer_output),
+        client: OpenApiClient::new(server, token, auth_mode, writer_output),
     })
 }
 
@@ -955,6 +1171,31 @@ fn required_operator(
                 output,
             )
         })
+}
+
+fn operator_for_mutation(
+    command_operator: Option<&str>,
+    context: &RuntimeContext,
+    output: OutputFormat,
+) -> Result<Option<String>, CliError> {
+    if context.auth_mode.is_user_token() {
+        if command_operator.is_some_and(|operator| !operator.trim().is_empty()) {
+            return Err(CliError::invalid_input(
+                "--operator is only used with consumer-token auth; user-token requests use the token owner as operator",
+                output,
+            ));
+        }
+        return Ok(None);
+    }
+
+    required_operator(command_operator, context, output).map(Some)
+}
+
+fn append_optional_query(path: String, key: &str, value: Option<&str>) -> String {
+    match value {
+        Some(value) => append_query(path, key, value),
+        None => path,
+    }
 }
 
 fn require_yes(cli: &Cli, output: OutputFormat) -> Result<(), CliError> {
@@ -1121,11 +1362,21 @@ fn resolve_setup_server(
 
 fn resolve_setup_operator(
     options: &ProfileSetupOptions,
+    auth_mode: AuthMode,
     interactive: bool,
     output: OutputFormat,
 ) -> Result<Option<String>, CliError> {
     if let Some(operator) = options.operator.clone().and_then(non_blank) {
+        if auth_mode.is_user_token() {
+            return Err(CliError::invalid_input(
+                "--operator is only used with consumer-token auth; user-token requests use the token owner as operator",
+                output,
+            ));
+        }
         return Ok(Some(operator));
+    }
+    if auth_mode.is_user_token() {
+        return Ok(None);
     }
     if matches!(options.mode, ProfileSetupMode::Init) {
         return Ok(Some(DEFAULT_INIT_OPERATOR.to_owned()));
@@ -1137,6 +1388,47 @@ fn resolve_setup_operator(
     }
 }
 
+fn resolve_auth_mode(
+    explicit: Option<AuthMode>,
+    token: Option<&Sensitive>,
+    existing: Option<AuthMode>,
+    default: AuthMode,
+    output: OutputFormat,
+) -> Result<AuthMode, CliError> {
+    if let Some(auth_mode) = explicit {
+        validate_auth_mode_for_token(auth_mode, token, output)?;
+        return Ok(auth_mode);
+    }
+
+    if let Some(token) = token {
+        return Ok(AuthMode::from_token_value(token.expose_secret()));
+    }
+
+    Ok(existing.unwrap_or(default))
+}
+
+fn validate_auth_mode_for_token(
+    auth_mode: AuthMode,
+    token: Option<&Sensitive>,
+    output: OutputFormat,
+) -> Result<(), CliError> {
+    let Some(token) = token else {
+        return Ok(());
+    };
+    let token_is_user_token = token.expose_secret().trim().starts_with(USER_TOKEN_PREFIX);
+    match (auth_mode, token_is_user_token) {
+        (AuthMode::UserToken, false) => Err(CliError::invalid_input(
+            "user-token auth mode requires a Portal user access token starting with apollo_pat_",
+            output,
+        )),
+        (AuthMode::ConsumerToken, true) => Err(CliError::invalid_input(
+            "consumer-token auth mode cannot use a Portal user access token starting with apollo_pat_",
+            output,
+        )),
+        _ => Ok(()),
+    }
+}
+
 fn resolve_setup_token(
     options: &ProfileSetupOptions,
     interactive: bool,
@@ -1145,7 +1437,7 @@ fn resolve_setup_token(
     if options.token_stdin {
         return credential::token_from_env_or_stdin(true, output).map(Some);
     }
-    if interactive && prompt_yes_no("Store a Consumer token now?", false, output)? {
+    if interactive && prompt_yes_no("Store an Apollo token now?", false, output)? {
         credential::prompt_token(output).map(Some)
     } else {
         Ok(None)
@@ -1303,9 +1595,10 @@ impl ProfileListResponse {
         for profile in &self.profiles {
             let marker = if profile.active { "*" } else { "-" };
             let output = profile.output.as_deref().unwrap_or("table");
+            let auth_mode = profile.auth_mode.as_deref().unwrap_or("consumer-token");
             lines.push(format!(
-                "{} {}  {}  {}",
-                marker, profile.name, profile.server, output
+                "{} {}  {}  {}  {}",
+                marker, profile.name, profile.server, output, auth_mode
             ));
         }
         lines.join("\n")
@@ -1319,6 +1612,9 @@ struct ProfileSummaryRow {
     server: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     output: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "authMode")]
+    auth_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     operator: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1335,6 +1631,7 @@ impl ProfileSummaryRow {
                 .clone()
                 .unwrap_or_else(|| "<none>".to_owned()),
             output: profile.output.map(|output| output.to_string()),
+            auth_mode: Some(profile.resolved_auth_mode().to_string()),
             operator: profile.operator.clone(),
             credential: profile.credential.clone(),
         }
@@ -1373,6 +1670,7 @@ impl ProfileShowResponse {
             self.context.server.as_deref().unwrap_or("<none>")
         ));
         lines.push(format!("Output: {}", self.context.output));
+        lines.push(format!("Auth mode: {}", self.context.auth_mode));
         if let Some(operator) = &self.context.operator {
             lines.push(format!("Operator: {}", operator));
         }
@@ -1391,6 +1689,8 @@ struct RuntimeContextRow {
     #[serde(skip_serializing_if = "Option::is_none")]
     server: Option<String>,
     output: String,
+    #[serde(rename = "authMode")]
+    auth_mode: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     operator: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1403,6 +1703,7 @@ impl RuntimeContextRow {
             profile: context.profile,
             server: context.server,
             output: context.output.to_string(),
+            auth_mode: context.auth_mode.to_string(),
             operator: context.operator,
             credential: context.credential,
         }
@@ -1424,6 +1725,8 @@ struct ProfileSetupResponse {
     active_profile: Option<String>,
     server: String,
     output: String,
+    #[serde(rename = "authMode")]
+    auth_mode: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     operator: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1439,6 +1742,7 @@ impl ProfileSetupResponse {
             format!("Config path: {}", self.config_path),
             format!("Server: {}", self.server),
             format!("Output: {}", self.output),
+            format!("Auth mode: {}", self.auth_mode),
         ];
         if self.active_profile.as_deref() == Some(self.profile.as_str()) {
             lines.push("Active profile: yes".to_owned());
@@ -1452,7 +1756,7 @@ impl ProfileSetupResponse {
         } else {
             lines.push("Credential: not configured".to_owned());
             lines.push(
-                "Run `apollo auth login --token-stdin` when you have a Consumer token.".to_owned(),
+                "Run `apollo auth login --token-stdin` after creating a Portal user access token, or use `--auth-mode consumer-token` for legacy consumer tokens.".to_owned(),
             );
         }
         if !self.next_steps.is_empty() {
@@ -1470,6 +1774,9 @@ struct AuthStatusResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     profile: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "authMode")]
+    auth_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     backend: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     key: Option<String>,
@@ -1482,12 +1789,16 @@ impl AuthStatusResponse {
         } else {
             "not authenticated"
         };
-        format!(
+        let mut lines = vec![format!(
             "Profile: {}\nStatus: {}\nSource: {}",
             self.profile.as_deref().unwrap_or("<none>"),
             state,
             self.source
-        )
+        )];
+        if let Some(auth_mode) = &self.auth_mode {
+            lines.push(format!("Auth mode: {}", auth_mode));
+        }
+        lines.join("\n")
     }
 }
 
@@ -1495,6 +1806,8 @@ impl AuthStatusResponse {
 struct AuthLoginResponse {
     stored: bool,
     profile: String,
+    #[serde(rename = "authMode")]
+    auth_mode: String,
     backend: String,
     key: String,
 }
@@ -1502,8 +1815,8 @@ struct AuthLoginResponse {
 impl AuthLoginResponse {
     fn render_table(&self) -> String {
         format!(
-            "Credential stored for profile '{}'.\nBackend: {}\nKey: {}",
-            self.profile, self.backend, self.key
+            "Credential stored for profile '{}'.\nAuth mode: {}\nBackend: {}\nKey: {}",
+            self.profile, self.auth_mode, self.backend, self.key
         )
     }
 }

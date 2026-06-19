@@ -398,6 +398,61 @@ fn init_creates_local_profile_and_file_credential_without_printing_token() {
 }
 
 #[test]
+fn init_defaults_to_user_token_auth_without_operator_when_no_token_is_provided() {
+    let home = temp_home();
+
+    let assert = base_command(&home)
+        .args(["--output", "json", "init"])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let json: Value = serde_json::from_str(&stdout).expect("json stdout");
+
+    assert_eq!(json["profile"], "local");
+    assert_eq!(json["authMode"], "user-token");
+    assert!(json["operator"].is_null());
+    assert!(json["credential"].is_null());
+
+    let config = fs::read_to_string(config_path(&home)).expect("config file");
+    assert!(config.contains("auth_mode = \"user-token\""));
+    assert!(!config.contains("operator ="));
+}
+
+#[test]
+fn profile_add_explicit_consumer_token_mode_keeps_operator() {
+    let home = temp_home();
+
+    let assert = base_command(&home)
+        .args([
+            "--output",
+            "json",
+            "--server",
+            "https://apollo-dev.example.com",
+            "profile",
+            "add",
+            "dev",
+            "--auth-mode",
+            "consumer-token",
+            "--operator",
+            "apollo-bot",
+        ])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let json: Value = serde_json::from_str(&stdout).expect("json stdout");
+
+    assert_eq!(json["profile"], "dev");
+    assert_eq!(json["authMode"], "consumer-token");
+    assert_eq!(json["operator"], "apollo-bot");
+
+    let config = fs::read_to_string(config_path(&home)).expect("config file");
+    assert!(config.contains("auth_mode = \"consumer-token\""));
+    assert!(config.contains("operator = \"apollo-bot\""));
+}
+
+#[test]
 fn init_with_apollo_output_json_does_not_persist_implicit_output() {
     let home = temp_home();
 
@@ -470,6 +525,8 @@ fn profile_add_trims_setup_values_before_persisting() {
             "profile",
             "add",
             "  dev  ",
+            "--auth-mode",
+            "consumer-token",
             "--operator",
             "  alice  ",
         ])
@@ -639,11 +696,13 @@ key = "dev"
         .success();
 
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    assert!(stdout.contains("Auth mode: consumer-token"));
     assert!(stdout.contains("Credential backend: file"));
     assert!(stdout.contains("Credential key: dev"));
 
     let config = fs::read_to_string(config_path(&home)).expect("config file");
     assert!(config.contains("server = \"https://apollo-new.example.com\""));
+    assert!(config.contains("auth_mode = \"consumer-token\""));
     assert!(config.contains("backend = \"file\""));
     assert!(config.contains("key = \"dev\""));
     assert!(credential_file_path(&home, "dev").exists());
