@@ -346,6 +346,12 @@ fn execute_profile_setup(
     let response_output = profile_output.unwrap_or(OutputFormat::Table);
     let existing_profile = loaded.config.profiles.get(&profile_name);
     let setup_token = resolve_setup_token(&options, interactive, writer_output)?;
+    reject_auth_mode_change_without_token(
+        options.auth_mode,
+        setup_token.as_ref(),
+        existing_profile,
+        writer_output,
+    )?;
     let auth_mode = resolve_auth_mode(
         options.auth_mode,
         setup_token.as_ref(),
@@ -353,7 +359,15 @@ fn execute_profile_setup(
         AuthMode::UserToken,
         writer_output,
     )?;
-    let operator = resolve_setup_operator(&options, auth_mode, interactive, writer_output)?;
+    let operator = resolve_setup_operator(&options, auth_mode, interactive, writer_output)?
+        .or_else(|| {
+            (!auth_mode.is_user_token())
+                .then(|| {
+                    existing_profile
+                        .and_then(|profile| profile.operator.clone().and_then(non_blank))
+                })
+                .flatten()
+        });
 
     let mut profile_config = ProfileConfig {
         server: Some(server.clone()),
@@ -1440,6 +1454,34 @@ fn resolve_setup_operator(
     } else {
         Ok(None)
     }
+}
+
+fn reject_auth_mode_change_without_token(
+    explicit: Option<AuthMode>,
+    token: Option<&Sensitive>,
+    existing_profile: Option<&ProfileConfig>,
+    output: OutputFormat,
+) -> Result<(), CliError> {
+    if token.is_some() {
+        return Ok(());
+    }
+    let Some(explicit) = explicit else {
+        return Ok(());
+    };
+    let Some(existing_profile) = existing_profile else {
+        return Ok(());
+    };
+    if existing_profile.credential.is_none() {
+        return Ok(());
+    }
+    let existing = existing_profile.resolved_auth_mode();
+    if explicit != existing {
+        return Err(CliError::invalid_input(
+            "provide a new token when changing --auth-mode for a profile with an existing stored credential",
+            output,
+        ));
+    }
+    Ok(())
 }
 
 fn resolve_auth_mode(
