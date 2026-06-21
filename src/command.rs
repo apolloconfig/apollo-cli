@@ -377,7 +377,11 @@ fn execute_profile_setup(
         output: profile_output,
         auth_mode: Some(auth_mode),
         operator: operator.clone(),
-        credential: existing_profile.and_then(|profile| profile.credential.clone()),
+        credential: preserved_setup_credential(
+            &profile_name,
+            existing_profile,
+            setup_token.as_ref(),
+        ),
     };
 
     let credential = setup_token
@@ -552,6 +556,7 @@ fn register_app_namespace(
     public_namespace: bool,
     operator: Option<&str>,
 ) -> Result<String, CliError> {
+    let registration = app_namespace_registration(namespace_name);
     if let Some(existing) = find_app_namespace(openapi, app_id, namespace_name)? {
         if public_namespace && matches!(existing.is_public, Some(false)) {
             return Err(CliError::invalid_input(
@@ -561,8 +566,12 @@ fn register_app_namespace(
         }
         return Ok(existing.name);
     }
+    if public_namespace
+        && let Some(existing) = find_prefixed_public_app_namespace(openapi, app_id, &registration)?
+    {
+        return Ok(existing.name);
+    }
 
-    let registration = app_namespace_registration(namespace_name);
     let path = format!(
         "/openapi/v1/apps/{}/appnamespaces",
         encode_path_segment(app_id)
@@ -616,6 +625,61 @@ fn find_app_namespace(
         Err(error) if is_missing_app_namespace(&error) => Ok(None),
         Err(error) => Err(error),
     }
+}
+
+fn find_prefixed_public_app_namespace(
+    openapi: &OpenApiCommandContext,
+    app_id: &str,
+    registration: &AppNamespaceRegistration,
+) -> Result<Option<ExistingAppNamespace>, CliError> {
+    let path = format!(
+        "/openapi/v1/apps/{}/appnamespaces",
+        encode_path_segment(app_id)
+    );
+    match openapi.client.request("GET", &path, None) {
+        Ok(response) => Ok(app_namespace_items(&response.data)
+            .into_iter()
+            .filter_map(existing_app_namespace_from_value)
+            .find(|namespace| {
+                matches!(namespace.is_public, Some(true))
+                    && stored_public_app_namespace_matches(&namespace.name, registration)
+            })),
+        Err(error) if is_missing_app_namespace(&error) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn app_namespace_items(data: &Value) -> Vec<&Value> {
+    if let Some(items) = data.as_array() {
+        return items.iter().collect();
+    }
+    data.get("content")
+        .and_then(Value::as_array)
+        .map(|items| items.iter().collect())
+        .unwrap_or_default()
+}
+
+fn existing_app_namespace_from_value(value: &Value) -> Option<ExistingAppNamespace> {
+    let name = value.get("name").and_then(Value::as_str)?;
+    if name.trim().is_empty() {
+        return None;
+    }
+    Some(ExistingAppNamespace {
+        name: name.to_owned(),
+        is_public: value.get("isPublic").and_then(Value::as_bool),
+    })
+}
+
+fn stored_public_app_namespace_matches(
+    stored_name: &str,
+    registration: &AppNamespaceRegistration,
+) -> bool {
+    let requested_name = if registration.format == "properties" {
+        registration.name.clone()
+    } else {
+        format!("{}.{}", registration.name, registration.format)
+    };
+    stored_name == requested_name || stored_name.ends_with(&format!(".{requested_name}"))
 }
 
 fn is_missing_app_namespace(error: &CliError) -> bool {
@@ -1481,9 +1545,6 @@ fn reject_auth_mode_change_without_token(
     let Some(existing_profile) = existing_profile else {
         return Ok(());
     };
-    if existing_profile.credential.is_none() {
-        return Ok(());
-    }
     let existing = existing_profile.resolved_auth_mode();
     if explicit != existing {
         return Err(CliError::invalid_input(
@@ -1492,6 +1553,28 @@ fn reject_auth_mode_change_without_token(
         ));
     }
     Ok(())
+}
+
+fn preserved_setup_credential(
+    profile_name: &str,
+    existing_profile: Option<&ProfileConfig>,
+    token: Option<&Sensitive>,
+) -> Option<CredentialRef> {
+    let existing_profile = existing_profile?;
+    if token.is_some() {
+        return existing_profile.credential.clone();
+    }
+    existing_profile
+        .credential
+        .clone()
+        .or_else(|| Some(disabled_credential(profile_name)))
+}
+
+fn disabled_credential(profile_name: &str) -> CredentialRef {
+    CredentialRef {
+        backend: "none".to_owned(),
+        key: profile_name.to_owned(),
+    }
 }
 
 fn resolve_auth_mode(

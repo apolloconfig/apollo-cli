@@ -790,6 +790,42 @@ key = "dev"
 }
 
 #[test]
+fn profile_add_overwrite_disables_implicit_native_credential_without_new_token() {
+    let home = temp_home();
+    write_config(
+        &home,
+        r#"
+active_profile = "dev"
+
+[profiles.dev]
+server = "https://apollo-old.example.com"
+auth_mode = "consumer-token"
+operator = "apollo-bot"
+"#,
+    );
+
+    let assert = base_command(&home)
+        .args([
+            "--server",
+            "https://apollo-new.example.com",
+            "profile",
+            "add",
+            "dev",
+            "--overwrite",
+        ])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    assert!(stdout.contains("Credential backend: none"));
+
+    let config = fs::read_to_string(config_path(&home)).expect("config file");
+    assert!(config.contains("server = \"https://apollo-new.example.com\""));
+    assert!(config.contains("backend = \"none\""));
+    assert!(config.contains("key = \"dev\""));
+}
+
+#[test]
 fn profile_add_sets_new_profile_active_when_active_profile_is_stale() {
     let home = temp_home();
     write_config(
@@ -873,6 +909,50 @@ key = "dev"
     let config = fs::read_to_string(config_path(&home)).expect("config file");
     assert!(config.contains("auth_mode = \"consumer-token\""));
     assert!(config.contains("operator = \"apollo-bot\""));
+}
+
+#[test]
+fn profile_add_overwrite_rejects_auth_mode_change_for_implicit_native_credential() {
+    let home = temp_home();
+    write_config(
+        &home,
+        r#"
+active_profile = "dev"
+
+[profiles.dev]
+server = "https://apollo-old.example.com"
+auth_mode = "consumer-token"
+operator = "apollo-bot"
+"#,
+    );
+
+    let assert = base_command(&home)
+        .args([
+            "--output",
+            "json",
+            "--server",
+            "https://apollo-new.example.com",
+            "profile",
+            "add",
+            "dev",
+            "--overwrite",
+            "--auth-mode",
+            "user-token",
+        ])
+        .assert()
+        .failure();
+
+    assert!(assert.get_output().stdout.is_empty());
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf8 stderr");
+    let json: Value = serde_json::from_str(&stderr).expect("json stderr");
+
+    assert_eq!(json["error"]["code"], "invalid_input");
+    assert!(stderr.contains("--auth-mode"));
+    assert!(stderr.contains("token"));
+
+    let config = fs::read_to_string(config_path(&home)).expect("config file");
+    assert!(config.contains("auth_mode = \"consumer-token\""));
+    assert!(!config.contains("auth_mode = \"user-token\""));
 }
 
 #[test]

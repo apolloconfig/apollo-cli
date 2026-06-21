@@ -114,7 +114,10 @@ impl OpenApiClient {
             if body.is_empty()
                 && let Some(location) = redirect_location
             {
-                body = format!("redirected to {location}");
+                body = format!(
+                    "redirected to {}",
+                    redact_exact_token(location, self.token.expose_secret())
+                );
             }
             if self.auth_mode.is_user_token()
                 && (matches!(status.as_u16(), 401 | 403) || status.is_redirection())
