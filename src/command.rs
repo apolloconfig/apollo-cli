@@ -341,10 +341,13 @@ fn execute_profile_setup(
         ));
     }
 
-    let server = resolve_setup_server(&options, cli, interactive, writer_output)?;
-    let profile_output = cli.global.output;
-    let response_output = profile_output.unwrap_or(OutputFormat::Table);
     let existing_profile = loaded.config.profiles.get(&profile_name);
+    let server = resolve_setup_server(&options, cli, interactive, writer_output)?;
+    let profile_output = cli
+        .global
+        .output
+        .or_else(|| existing_profile.and_then(|profile| profile.output));
+    let response_output = profile_output.unwrap_or(OutputFormat::Table);
     let setup_token = resolve_setup_token(&options, interactive, writer_output)?;
     reject_auth_mode_change_without_token(
         options.auth_mode,
@@ -396,7 +399,11 @@ fn execute_profile_setup(
 
     let mut config = loaded.config.clone();
     config.profiles.insert(profile_name.clone(), profile_config);
-    let should_set_active = options.use_profile || config.active_profile.is_none();
+    let should_set_active = options.use_profile
+        || match config.active_profile.as_deref() {
+            Some(active_profile) => !config.profiles.contains_key(active_profile),
+            None => true,
+        };
     if should_set_active {
         config.active_profile = Some(profile_name.clone());
     }
@@ -594,15 +601,18 @@ fn find_app_namespace(
         encode_path_segment(namespace_name)
     );
     match openapi.client.request("GET", &path, None) {
-        Ok(response) => Ok(Some(ExistingAppNamespace {
-            name: response
-                .data
-                .get("name")
-                .and_then(Value::as_str)
-                .unwrap_or(namespace_name)
-                .to_owned(),
-            is_public: response.data.get("isPublic").and_then(Value::as_bool),
-        })),
+        Ok(response) => {
+            let Some(name) = response.data.get("name").and_then(Value::as_str) else {
+                return Ok(None);
+            };
+            if name.trim().is_empty() {
+                return Ok(None);
+            }
+            Ok(Some(ExistingAppNamespace {
+                name: name.to_owned(),
+                is_public: response.data.get("isPublic").and_then(Value::as_bool),
+            }))
+        }
         Err(error) if is_missing_app_namespace(&error) => Ok(None),
         Err(error) => Err(error),
     }

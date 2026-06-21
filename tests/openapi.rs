@@ -1002,6 +1002,55 @@ fn namespace_create_reuses_existing_appnamespace() {
 }
 
 #[test]
+fn namespace_create_treats_empty_appnamespace_lookup_as_missing() {
+    let server = TestServer::sequence(vec![
+        (200, "application/json", "{}"),
+        (200, "application/json", r#"{"name":"application"}"#),
+        (200, "application/json", "{}"),
+    ]);
+    let home = temp_home();
+    write_config(
+        &home,
+        &profile_config_with_operator(&server.url(), "apollo-bot"),
+    );
+
+    base_command(&home)
+        .env("APOLLO_TOKEN", "consumer-token")
+        .args([
+            "--yes",
+            "--output",
+            "json",
+            "namespace",
+            "create",
+            "--env",
+            "DEV",
+            "--app",
+            "demo",
+            "application",
+        ])
+        .assert()
+        .success();
+
+    let requests = server.requests(3);
+    assert_eq!(requests[0].method, "GET");
+    assert_eq!(
+        requests[0].path,
+        "/openapi/v1/apps/demo/appnamespaces/application"
+    );
+
+    assert_eq!(requests[1].method, "POST");
+    assert_eq!(requests[1].path, "/openapi/v1/apps/demo/appnamespaces");
+    let app_namespace_body: Value = serde_json::from_str(&requests[1].body).expect("json body");
+    assert_eq!(app_namespace_body["name"], "application");
+
+    assert_eq!(requests[2].method, "POST");
+    assert_eq!(
+        requests[2].path,
+        "/openapi/v1/namespaces?operator=apollo-bot"
+    );
+}
+
+#[test]
 fn namespace_create_rejects_public_flag_for_existing_private_appnamespace() {
     let server = TestServer::sequence(vec![
         (

@@ -748,6 +748,83 @@ key = "dev"
 }
 
 #[test]
+fn profile_add_overwrite_preserves_existing_output_without_global_output() {
+    let home = temp_home();
+    write_config(
+        &home,
+        r#"
+active_profile = "dev"
+
+[profiles.dev]
+server = "https://apollo-old.example.com"
+output = "json"
+
+[profiles.dev.credential]
+backend = "file"
+key = "dev"
+"#,
+    );
+    fs::create_dir_all(credential_file_path(&home, "dev").parent().expect("parent"))
+        .expect("credential dir");
+    fs::write(credential_file_path(&home, "dev"), "apollo_pat_secret\n").expect("credential file");
+
+    let assert = base_command(&home)
+        .args([
+            "--server",
+            "https://apollo-new.example.com",
+            "profile",
+            "add",
+            "dev",
+            "--overwrite",
+        ])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let json: Value = serde_json::from_str(&stdout).expect("json stdout");
+
+    assert_eq!(json["output"], "json");
+    let config = fs::read_to_string(config_path(&home)).expect("config file");
+    assert!(config.contains("server = \"https://apollo-new.example.com\""));
+    assert!(config.contains("output = \"json\""));
+}
+
+#[test]
+fn profile_add_sets_new_profile_active_when_active_profile_is_stale() {
+    let home = temp_home();
+    write_config(
+        &home,
+        r#"
+active_profile = "deleted"
+
+[profiles.other]
+server = "https://apollo-other.example.com"
+output = "table"
+"#,
+    );
+
+    let assert = base_command(&home)
+        .args([
+            "--output",
+            "json",
+            "--server",
+            "https://apollo-dev.example.com",
+            "profile",
+            "add",
+            "dev",
+        ])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let json: Value = serde_json::from_str(&stdout).expect("json stdout");
+
+    assert_eq!(json["activeProfile"], "dev");
+    let config = fs::read_to_string(config_path(&home)).expect("config file");
+    assert!(config.contains("active_profile = \"dev\""));
+}
+
+#[test]
 fn profile_add_overwrite_rejects_auth_mode_change_without_new_token() {
     let home = temp_home();
     write_config(
