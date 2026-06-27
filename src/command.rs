@@ -1,4 +1,6 @@
 use std::io::{self, BufRead, IsTerminal, Write};
+use std::thread;
+use std::time::Duration;
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::Serialize;
@@ -22,6 +24,7 @@ use crate::redaction::Sensitive;
 const DEFAULT_PAGE: u32 = 0;
 const DEFAULT_PAGE_SIZE: u32 = 20;
 const SYNC_ITEMS_PAGE_SIZE: u32 = 500;
+const NAMESPACE_CREATE_RECOVERY_DELAY: Duration = Duration::from_millis(1100);
 const DEFAULT_INIT_PROFILE: &str = "local";
 const DEFAULT_INIT_SERVER: &str = "http://127.0.0.1:8070";
 const DEFAULT_INIT_OPERATOR: &str = "apollo";
@@ -557,23 +560,32 @@ fn execute_namespace(
             }]);
             match openapi.request("POST", &path, Some(body)) {
                 Ok(output) => Ok(output),
-                Err(error) if is_namespace_create_reported_failed(&error) => {
+                Err(error) => {
                     let namespace_scope = NamespaceScopeArgs {
                         cluster_scope: scope,
                         namespace: app_namespace_name,
                     };
-                    match openapi
-                        .client
-                        .request("GET", &namespace_path(&namespace_scope), None)
-                    {
-                        Ok(response) => Ok(render_openapi_response(&openapi.writer, &response)),
-                        Err(_) => Err(error),
-                    }
+                    recover_created_namespace(&openapi, &namespace_scope, error)
                 }
-                Err(error) => Err(error),
             }
         }
     }
+}
+
+fn recover_created_namespace(
+    openapi: &OpenApiCommandContext,
+    namespace_scope: &NamespaceScopeArgs,
+    original_error: CliError,
+) -> Result<RenderedOutput, CliError> {
+    let path = namespace_path(namespace_scope);
+    for attempt in 0..2 {
+        match openapi.client.request("GET", &path, None) {
+            Ok(response) => return Ok(render_openapi_response(&openapi.writer, &response)),
+            Err(_) if attempt == 0 => thread::sleep(NAMESPACE_CREATE_RECOVERY_DELAY),
+            Err(_) => return Err(original_error),
+        }
+    }
+    Err(original_error)
 }
 
 struct AppNamespaceRegistration {
@@ -726,13 +738,6 @@ fn is_missing_app_namespace(error: &CliError) -> bool {
             && error
                 .http_status_message()
                 .is_some_and(|message| message.contains("appNamespace not exist")))
-}
-
-fn is_namespace_create_reported_failed(error: &CliError) -> bool {
-    matches!(error.http_status_code(), Some(400))
-        && error
-            .http_status_message()
-            .is_some_and(|message| message.contains("create namespace failed for"))
 }
 
 fn app_namespace_registration(namespace_name: &str) -> AppNamespaceRegistration {
