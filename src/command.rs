@@ -507,6 +507,7 @@ fn execute_app(
             }
         }
         AppCommand::Get { app_id } => {
+            ensure_consumer_token_app_authorized(&openapi, &app_id)?;
             let path = format!("/openapi/v1/apps/{}", encode_path_segment(&app_id));
             openapi.request("GET", &path, None)
         }
@@ -521,6 +522,7 @@ fn execute_env(
     let openapi = openapi_context(cli, output)?;
     match command {
         EnvCommand::List { app } => {
+            ensure_consumer_token_app_authorized(&openapi, &app)?;
             let path = format!("/openapi/v1/apps/{}/envclusters", encode_path_segment(&app));
             openapi.request("GET", &path, None)
         }
@@ -552,7 +554,13 @@ fn execute_namespace(
                 cluster_scope: scope,
                 namespace,
             });
-            openapi.request("GET", &path, None)
+            let response = openapi.client.request("GET", &path, None)?;
+            let data = redact_nested_item_values(response.data.clone());
+            Ok(render_openapi_response_with_data(
+                &openapi.writer,
+                &response,
+                data,
+            ))
         }
         NamespaceCommand::Create {
             scope,
@@ -662,6 +670,14 @@ fn register_app_namespace(
     let registration = app_namespace_registration(namespace_name);
     if let Some(existing) = find_app_namespace(openapi, app_id, namespace_name)? {
         if public_namespace && matches!(existing.is_public, Some(false)) {
+            if let Some(existing) =
+                find_prefixed_public_app_namespace(openapi, app_id, &registration)?
+            {
+                return Ok(RegisteredAppNamespace {
+                    name: existing.name,
+                    created: false,
+                });
+            }
             return Err(CliError::invalid_input(
                 "existing app namespace is private; remove --public or create a public app namespace before reusing it",
                 openapi.context.output,
@@ -872,6 +888,7 @@ fn execute_config(
             ))
         }
         ConfigCommand::Get { scope, key } => {
+            ensure_consumer_token_app_authorized(&openapi, &scope.cluster_scope.app)?;
             let path = item_read_path(&scope, &key);
             openapi.request("GET", &path, None)
         }
@@ -951,7 +968,13 @@ fn execute_config(
                 sync_items,
             );
             let path = format!("{}/items/diff", namespace_path(&scope));
-            openapi.request("POST", &path, Some(body))
+            let response = openapi.client.request("POST", &path, Some(body))?;
+            let data = redact_config_item_values(response.data.clone());
+            Ok(render_openapi_response_with_data(
+                &openapi.writer,
+                &response,
+                data,
+            ))
         }
         ConfigCommand::Apply {
             scope,
@@ -1034,7 +1057,13 @@ fn execute_release(
             if let Some(operator) = operator {
                 body["releasedBy"] = json!(operator);
             }
-            openapi.request("POST", &path, Some(body))
+            let response = openapi.client.request("POST", &path, Some(body))?;
+            let data = redact_release_configurations(response.data.clone());
+            Ok(render_openapi_response_with_data(
+                &openapi.writer,
+                &response,
+                data,
+            ))
         }
         ReleaseCommand::Rollback {
             env,
@@ -1376,6 +1405,46 @@ fn filter_apps_by_ids(data: Value, app_ids: &str) -> Value {
             .and_then(Value::as_str)
             .is_some_and(|app_id| selected.contains(app_id))
     })
+}
+
+fn ensure_consumer_token_app_authorized(
+    openapi: &OpenApiCommandContext,
+    app_id: &str,
+) -> Result<(), CliError> {
+    if openapi.context.auth_mode.is_user_token() {
+        return Ok(());
+    }
+
+    let response = openapi
+        .client
+        .request("GET", "/openapi/v1/apps/authorized", None)?;
+    if app_id_in_authorized_apps(&response.data, app_id) {
+        return Ok(());
+    }
+
+    Err(CliError::invalid_input(
+        &format!(
+            "consumer-token profile is not authorized for app `{app_id}`; check the token's authorized apps or use user-token mode"
+        ),
+        openapi.context.output,
+    ))
+}
+
+fn app_id_in_authorized_apps(data: &Value, app_id: &str) -> bool {
+    data.as_array()
+        .map(|items| items.as_slice())
+        .or_else(|| {
+            data.get("content")
+                .and_then(Value::as_array)
+                .map(Vec::as_slice)
+        })
+        .unwrap_or_default()
+        .iter()
+        .any(|app| {
+            app.get("appId")
+                .and_then(Value::as_str)
+                .is_some_and(|authorized_app_id| authorized_app_id == app_id)
+        })
 }
 
 fn redact_config_item_values(mut data: Value) -> Value {

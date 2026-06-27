@@ -287,7 +287,10 @@ fn app_and_env_commands_call_openapi_endpoints() {
         .stdout(predicate::str::contains(r#""appId": "demo""#));
     assert_eq!(app_ids_server.request().path, "/openapi/v1/apps/authorized");
 
-    let app_get_server = TestServer::json(r#"{"appId":"demo"}"#);
+    let app_get_server = TestServer::sequence(vec![
+        (200, "application/json", r#"[{"appId":"demo"}]"#),
+        (200, "application/json", r#"{"appId":"demo"}"#),
+    ]);
     write_config(&home, &profile_config(&app_get_server.url()));
     base_command(&home)
         .env("APOLLO_TOKEN", "consumer-token")
@@ -295,9 +298,14 @@ fn app_and_env_commands_call_openapi_endpoints() {
         .assert()
         .success()
         .stdout(predicate::str::contains(r#""appId": "demo""#));
-    assert_eq!(app_get_server.request().path, "/openapi/v1/apps/demo");
+    let requests = app_get_server.requests(2);
+    assert_eq!(requests[0].path, "/openapi/v1/apps/authorized");
+    assert_eq!(requests[1].path, "/openapi/v1/apps/demo");
 
-    let env_server = TestServer::json(r#"["DEV","FAT"]"#);
+    let env_server = TestServer::sequence(vec![
+        (200, "application/json", r#"[{"appId":"demo"}]"#),
+        (200, "application/json", r#"["DEV","FAT"]"#),
+    ]);
     write_config(&home, &profile_config(&env_server.url()));
     base_command(&home)
         .env("APOLLO_TOKEN", "consumer-token")
@@ -305,10 +313,9 @@ fn app_and_env_commands_call_openapi_endpoints() {
         .assert()
         .success()
         .stdout(predicate::str::contains("DEV"));
-    assert_eq!(
-        env_server.request().path,
-        "/openapi/v1/apps/demo/envclusters"
-    );
+    let requests = env_server.requests(2);
+    assert_eq!(requests[0].path, "/openapi/v1/apps/authorized");
+    assert_eq!(requests[1].path, "/openapi/v1/apps/demo/envclusters");
 }
 
 #[test]
@@ -336,6 +343,117 @@ fn consumer_token_app_list_filters_authorized_apps_locally() {
     assert_eq!(json["data"].as_array().expect("data array").len(), 1);
     assert_eq!(json["data"][0]["appId"], "demo");
     assert!(!stdout.contains("other"));
+}
+
+#[test]
+fn consumer_token_scoped_read_commands_check_authorized_apps() {
+    let app_get_server = TestServer::sequence(vec![
+        (200, "application/json", r#"[{"appId":"demo"}]"#),
+        (200, "application/json", r#"{"appId":"demo","name":"Demo"}"#),
+    ]);
+    let home = temp_home();
+    write_config(&home, &profile_config(&app_get_server.url()));
+
+    base_command(&home)
+        .env("APOLLO_TOKEN", "consumer-token")
+        .args(["--output", "json", "app", "get", "demo"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""name": "Demo""#));
+
+    let requests = app_get_server.requests(2);
+    assert_eq!(requests[0].path, "/openapi/v1/apps/authorized");
+    assert_eq!(requests[1].path, "/openapi/v1/apps/demo");
+
+    let env_server = TestServer::sequence(vec![
+        (200, "application/json", r#"[{"appId":"demo"}]"#),
+        (200, "application/json", r#"["DEV"]"#),
+    ]);
+    write_config(&home, &profile_config(&env_server.url()));
+    base_command(&home)
+        .env("APOLLO_TOKEN", "consumer-token")
+        .args(["--output", "json", "env", "list", "--app", "demo"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("DEV"));
+
+    let requests = env_server.requests(2);
+    assert_eq!(requests[0].path, "/openapi/v1/apps/authorized");
+    assert_eq!(requests[1].path, "/openapi/v1/apps/demo/envclusters");
+
+    let config_server = TestServer::sequence(vec![
+        (200, "application/json", r#"[{"appId":"demo"}]"#),
+        (
+            200,
+            "application/json",
+            r#"{"key":"timeout","value":"3000"}"#,
+        ),
+    ]);
+    write_config(&home, &profile_config(&config_server.url()));
+    base_command(&home)
+        .env("APOLLO_TOKEN", "consumer-token")
+        .args([
+            "--output", "json", "config", "get", "--env", "DEV", "--app", "demo", "timeout",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""value": "3000""#));
+
+    let requests = config_server.requests(2);
+    assert_eq!(requests[0].path, "/openapi/v1/apps/authorized");
+    assert_eq!(
+        requests[1].path,
+        "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/application/items/timeout"
+    );
+}
+
+#[test]
+fn consumer_token_scoped_read_commands_reject_unauthorized_apps() {
+    let home = temp_home();
+
+    let app_get_server = TestServer::json(r#"[{"appId":"other"}]"#);
+    write_config(&home, &profile_config(&app_get_server.url()));
+    let assert = base_command(&home)
+        .env("APOLLO_TOKEN", "consumer-token")
+        .args(["--output", "json", "app", "get", "demo"])
+        .assert()
+        .failure();
+    assert!(assert.get_output().stdout.is_empty());
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf8 stderr");
+    let json: Value = serde_json::from_str(&stderr).expect("json stderr");
+    assert_eq!(json["error"]["code"], "invalid_input");
+    assert!(stderr.contains("not authorized"));
+    assert_eq!(app_get_server.request().path, "/openapi/v1/apps/authorized");
+
+    let env_server = TestServer::json(r#"[{"appId":"other"}]"#);
+    write_config(&home, &profile_config(&env_server.url()));
+    let assert = base_command(&home)
+        .env("APOLLO_TOKEN", "consumer-token")
+        .args(["--output", "json", "env", "list", "--app", "demo"])
+        .assert()
+        .failure();
+    assert!(assert.get_output().stdout.is_empty());
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf8 stderr");
+    let json: Value = serde_json::from_str(&stderr).expect("json stderr");
+    assert_eq!(json["error"]["code"], "invalid_input");
+    assert!(stderr.contains("not authorized"));
+    assert_eq!(env_server.request().path, "/openapi/v1/apps/authorized");
+
+    let config_server = TestServer::json(r#"[{"appId":"other"}]"#);
+    write_config(&home, &profile_config(&config_server.url()));
+    let assert = base_command(&home)
+        .env("APOLLO_TOKEN", "consumer-token")
+        .args([
+            "--output", "json", "config", "get", "--env", "DEV", "--app", "demo", "timeout",
+        ])
+        .assert()
+        .failure();
+    assert!(assert.get_output().stdout.is_empty());
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf8 stderr");
+    let json: Value = serde_json::from_str(&stderr).expect("json stderr");
+    assert_eq!(json["error"]["code"], "invalid_input");
+    assert!(stderr.contains("not authorized"));
+    assert_eq!(config_server.request().path, "/openapi/v1/apps/authorized");
 }
 
 #[test]
@@ -385,7 +503,14 @@ fn namespace_config_and_release_commands_map_to_openapi_paths() {
         "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/settings"
     );
 
-    let config_server = TestServer::json(r#"{"key":"timeout","value":"3000"}"#);
+    let config_server = TestServer::sequence(vec![
+        (200, "application/json", r#"[{"appId":"demo"}]"#),
+        (
+            200,
+            "application/json",
+            r#"{"key":"timeout","value":"3000"}"#,
+        ),
+    ]);
     write_config(&home, &profile_config(&config_server.url()));
     base_command(&home)
         .env("APOLLO_TOKEN", "consumer-token")
@@ -394,8 +519,10 @@ fn namespace_config_and_release_commands_map_to_openapi_paths() {
         ])
         .assert()
         .success();
+    let requests = config_server.requests(2);
+    assert_eq!(requests[0].path, "/openapi/v1/apps/authorized");
     assert_eq!(
-        config_server.request().path,
+        requests[1].path,
         "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/application/items/timeout"
     );
 
@@ -485,6 +612,93 @@ fn list_commands_redact_broad_config_values() {
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
     let json: Value = serde_json::from_str(&stdout).expect("json stdout");
     assert_eq!(json["data"][0]["configurations"], "[REDACTED]");
+    assert!(!stdout.contains("s3cr3t"));
+}
+
+#[test]
+fn single_read_commands_redact_broad_config_values() {
+    let namespace_server = TestServer::json(
+        r#"{"namespaceName":"application","items":[{"key":"db.password","value":"s3cr3t"}]}"#,
+    );
+    let home = temp_home();
+    write_config(&home, &profile_config(&namespace_server.url()));
+
+    let assert = base_command(&home)
+        .env("APOLLO_TOKEN", "consumer-token")
+        .args([
+            "--output",
+            "json",
+            "namespace",
+            "get",
+            "--env",
+            "DEV",
+            "--app",
+            "demo",
+            "application",
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let json: Value = serde_json::from_str(&stdout).expect("json stdout");
+    assert_eq!(json["data"]["items"][0]["value"], "[REDACTED]");
+    assert!(!stdout.contains("s3cr3t"));
+
+    let release_server =
+        TestServer::json(r#"{"id":1,"name":"release","configurations":{"db.password":"s3cr3t"}}"#);
+    write_config(
+        &home,
+        &profile_config_with_operator(&release_server.url(), "apollo-bot"),
+    );
+    let assert = base_command(&home)
+        .env("APOLLO_TOKEN", "consumer-token")
+        .args([
+            "--yes", "--output", "json", "release", "create", "--env", "DEV", "--app", "demo",
+            "--title", "v1",
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let json: Value = serde_json::from_str(&stdout).expect("json stdout");
+    assert_eq!(json["data"]["configurations"], "[REDACTED]");
+    assert!(!stdout.contains("s3cr3t"));
+
+    let diff_server = TestServer::sequence(vec![
+        (
+            200,
+            "application/json",
+            r#"{"content":[{"key":"timeout","value":"3000"}],"page":0,"size":500,"total":1}"#,
+        ),
+        (
+            200,
+            "application/json",
+            r#"{"createItems":[{"key":"db.password","value":"s3cr3t"}],"updateItems":[{"key":"plain","oldValue":"old","newValue":"s3cr3t"}]}"#,
+        ),
+    ]);
+    write_config(
+        &home,
+        &profile_config_with_operator(&diff_server.url(), "apollo-bot"),
+    );
+    let assert = base_command(&home)
+        .env("APOLLO_TOKEN", "consumer-token")
+        .args([
+            "--output",
+            "json",
+            "config",
+            "diff",
+            "--env",
+            "DEV",
+            "--app",
+            "demo",
+            "--target-env",
+            "FAT",
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let json: Value = serde_json::from_str(&stdout).expect("json stdout");
+    assert_eq!(json["data"]["createItems"][0]["value"], "[REDACTED]");
+    assert_eq!(json["data"]["updateItems"][0]["oldValue"], "[REDACTED]");
+    assert_eq!(json["data"]["updateItems"][0]["newValue"], "[REDACTED]");
     assert!(!stdout.contains("s3cr3t"));
 }
 
@@ -821,7 +1035,14 @@ fn config_set_with_yes_sends_comment_when_provided() {
 
 #[test]
 fn config_item_commands_use_encoded_items_for_path_sensitive_keys() {
-    let get_server = TestServer::json(r#"{"key":"logging/level","value":"debug"}"#);
+    let get_server = TestServer::sequence(vec![
+        (200, "application/json", r#"[{"appId":"demo"}]"#),
+        (
+            200,
+            "application/json",
+            r#"{"key":"logging/level","value":"debug"}"#,
+        ),
+    ]);
     let home = temp_home();
     write_config(
         &home,
@@ -843,8 +1064,10 @@ fn config_item_commands_use_encoded_items_for_path_sensitive_keys() {
         ])
         .assert()
         .success();
+    let requests = get_server.requests(2);
+    assert_eq!(requests[0].path, "/openapi/v1/apps/authorized");
     assert_eq!(
-        get_server.request().path,
+        requests[1].path,
         "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/application/encodedItems/bG9nZ2luZy9sZXZlbA"
     );
 
@@ -1401,6 +1624,64 @@ fn namespace_create_reuses_existing_prefixed_public_appnamespace() {
     assert_eq!(
         requests[3].path,
         "/openapi/v1/namespaces?operator=apollo-bot"
+    );
+    let namespace_body: Value = serde_json::from_str(&requests[3].body).expect("json body");
+    assert_eq!(namespace_body[0]["appNamespaceName"], "FX.application.yml");
+}
+
+#[test]
+fn namespace_create_reuses_prefixed_public_when_unprefixed_private_exists() {
+    let server = TestServer::sequence(vec![
+        (
+            200,
+            "application/json",
+            r#"{"name":"application.yml","isPublic":false}"#,
+        ),
+        (
+            200,
+            "application/json",
+            r#"[{"name":"FX.application.yml","isPublic":true}]"#,
+        ),
+        (
+            404,
+            "application/json",
+            r#"{"message":"namespace not exist"}"#,
+        ),
+        (200, "application/json", "{}"),
+    ]);
+    let home = temp_home();
+    write_config(
+        &home,
+        &profile_config_with_operator(&server.url(), "apollo-bot"),
+    );
+
+    base_command(&home)
+        .env("APOLLO_TOKEN", "consumer-token")
+        .args([
+            "--yes",
+            "--output",
+            "json",
+            "namespace",
+            "create",
+            "--env",
+            "DEV",
+            "--app",
+            "demo",
+            "--public",
+            "application.yml",
+        ])
+        .assert()
+        .success();
+
+    let requests = server.requests(4);
+    assert_eq!(
+        requests[0].path,
+        "/openapi/v1/apps/demo/appnamespaces/application.yml"
+    );
+    assert_eq!(requests[1].path, "/openapi/v1/apps/demo/appnamespaces");
+    assert_eq!(
+        requests[2].path,
+        "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/FX.application.yml"
     );
     let namespace_body: Value = serde_json::from_str(&requests[3].body).expect("json body");
     assert_eq!(namespace_body[0]["appNamespaceName"], "FX.application.yml");
