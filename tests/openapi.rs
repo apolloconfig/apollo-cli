@@ -329,20 +329,18 @@ fn app_and_env_commands_call_openapi_endpoints() {
     assert_eq!(requests[0].path, "/openapi/v1/apps/authorized");
     assert_eq!(requests[1].path, "/openapi/v1/apps/demo");
 
-    let env_server = TestServer::sequence(vec![
-        (200, "application/json", r#"[{"appId":"demo"}]"#),
-        (200, "application/json", r#"["DEV","FAT"]"#),
-    ]);
+    let env_server = TestServer::json(r#"["DEV","FAT"]"#);
     write_config(&home, &profile_config(&env_server.url()));
     base_command(&home)
-        .env("APOLLO_TOKEN", "consumer-token")
+        .env("APOLLO_TOKEN", "apollo_pat_test_token")
         .args(["--output", "json", "env", "list", "--app", "demo"])
         .assert()
         .success()
         .stdout(predicate::str::contains("DEV"));
-    let requests = env_server.requests(2);
-    assert_eq!(requests[0].path, "/openapi/v1/apps/authorized");
-    assert_eq!(requests[1].path, "/openapi/v1/apps/demo/envclusters");
+    assert_eq!(
+        env_server.request().path,
+        "/openapi/v1/apps/demo/envclusters"
+    );
 }
 
 #[test]
@@ -373,7 +371,7 @@ fn consumer_token_app_list_filters_authorized_apps_locally() {
 }
 
 #[test]
-fn consumer_token_scoped_read_commands_check_authorized_apps() {
+fn consumer_token_app_get_checks_authorized_apps() {
     let app_get_server = TestServer::sequence(vec![
         (200, "application/json", r#"[{"appId":"demo"}]"#),
         (200, "application/json", r#"{"appId":"demo","name":"Demo"}"#),
@@ -391,95 +389,10 @@ fn consumer_token_scoped_read_commands_check_authorized_apps() {
     let requests = app_get_server.requests(2);
     assert_eq!(requests[0].path, "/openapi/v1/apps/authorized");
     assert_eq!(requests[1].path, "/openapi/v1/apps/demo");
-
-    let env_server = TestServer::sequence(vec![
-        (200, "application/json", r#"[{"appId":"demo"}]"#),
-        (200, "application/json", r#"["DEV"]"#),
-    ]);
-    write_config(&home, &profile_config(&env_server.url()));
-    base_command(&home)
-        .env("APOLLO_TOKEN", "consumer-token")
-        .args(["--output", "json", "env", "list", "--app", "demo"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("DEV"));
-
-    let requests = env_server.requests(2);
-    assert_eq!(requests[0].path, "/openapi/v1/apps/authorized");
-    assert_eq!(requests[1].path, "/openapi/v1/apps/demo/envclusters");
-
-    let namespace_list_server = TestServer::sequence(vec![
-        (200, "application/json", r#"[{"appId":"demo"}]"#),
-        (
-            200,
-            "application/json",
-            r#"[{"namespaceName":"application"}]"#,
-        ),
-    ]);
-    write_config(&home, &profile_config(&namespace_list_server.url()));
-    base_command(&home)
-        .env("APOLLO_TOKEN", "consumer-token")
-        .args([
-            "--output",
-            "json",
-            "namespace",
-            "list",
-            "--env",
-            "DEV",
-            "--app",
-            "demo",
-        ])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains(
-            r#""namespaceName": "application""#,
-        ));
-
-    let requests = namespace_list_server.requests(2);
-    assert_eq!(requests[0].path, "/openapi/v1/apps/authorized");
-    assert_eq!(
-        requests[1].path,
-        "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces"
-    );
-
-    let namespace_get_server = TestServer::sequence(vec![
-        (200, "application/json", r#"[{"appId":"demo"}]"#),
-        (
-            200,
-            "application/json",
-            r#"{"namespaceName":"application"}"#,
-        ),
-    ]);
-    write_config(&home, &profile_config(&namespace_get_server.url()));
-    base_command(&home)
-        .env("APOLLO_TOKEN", "consumer-token")
-        .args([
-            "--output",
-            "json",
-            "namespace",
-            "get",
-            "--env",
-            "DEV",
-            "--app",
-            "demo",
-            "application",
-        ])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains(
-            r#""namespaceName": "application""#,
-        ));
-
-    let requests = namespace_get_server.requests(2);
-    assert_eq!(requests[0].path, "/openapi/v1/apps/authorized");
-    assert_eq!(
-        requests[1].path,
-        "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/application"
-    );
 }
 
 #[test]
-fn consumer_token_scoped_read_commands_reject_unauthorized_apps() {
+fn consumer_token_app_get_rejects_unauthorized_apps() {
     let home = temp_home();
 
     let app_get_server = TestServer::json(r#"[{"appId":"other"}]"#);
@@ -495,77 +408,10 @@ fn consumer_token_scoped_read_commands_reject_unauthorized_apps() {
     assert_eq!(json["error"]["code"], "invalid_input");
     assert!(stderr.contains("not authorized"));
     assert_eq!(app_get_server.request().path, "/openapi/v1/apps/authorized");
-
-    let env_server = TestServer::json(r#"[{"appId":"other"}]"#);
-    write_config(&home, &profile_config(&env_server.url()));
-    let assert = base_command(&home)
-        .env("APOLLO_TOKEN", "consumer-token")
-        .args(["--output", "json", "env", "list", "--app", "demo"])
-        .assert()
-        .failure();
-    assert!(assert.get_output().stdout.is_empty());
-    let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf8 stderr");
-    let json: Value = serde_json::from_str(&stderr).expect("json stderr");
-    assert_eq!(json["error"]["code"], "invalid_input");
-    assert!(stderr.contains("not authorized"));
-    assert_eq!(env_server.request().path, "/openapi/v1/apps/authorized");
-
-    let namespace_server = TestServer::json(r#"[{"appId":"other"}]"#);
-    write_config(&home, &profile_config(&namespace_server.url()));
-    let assert = base_command(&home)
-        .env("APOLLO_TOKEN", "consumer-token")
-        .args([
-            "--output",
-            "json",
-            "namespace",
-            "list",
-            "--env",
-            "DEV",
-            "--app",
-            "demo",
-        ])
-        .assert()
-        .failure();
-    assert!(assert.get_output().stdout.is_empty());
-    let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf8 stderr");
-    let json: Value = serde_json::from_str(&stderr).expect("json stderr");
-    assert_eq!(json["error"]["code"], "invalid_input");
-    assert!(stderr.contains("not authorized"));
-    assert_eq!(
-        namespace_server.request().path,
-        "/openapi/v1/apps/authorized"
-    );
-
-    let namespace_get_server = TestServer::json(r#"[{"appId":"other"}]"#);
-    write_config(&home, &profile_config(&namespace_get_server.url()));
-    let assert = base_command(&home)
-        .env("APOLLO_TOKEN", "consumer-token")
-        .args([
-            "--output",
-            "json",
-            "namespace",
-            "get",
-            "--env",
-            "DEV",
-            "--app",
-            "demo",
-            "application",
-        ])
-        .assert()
-        .failure();
-    assert!(assert.get_output().stdout.is_empty());
-    let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf8 stderr");
-    let json: Value = serde_json::from_str(&stderr).expect("json stderr");
-    assert_eq!(json["error"]["code"], "invalid_input");
-    assert!(stderr.contains("not authorized"));
-    assert_eq!(
-        namespace_get_server.request().path,
-        "/openapi/v1/apps/authorized"
-    );
 }
 
 #[test]
-fn consumer_token_config_item_reads_fail_closed_without_namespace_scope() {
+fn consumer_token_scoped_reads_fail_closed_without_namespace_scope() {
     let server = TestServer::empty();
     let home = temp_home();
     write_config(
@@ -605,6 +451,28 @@ fn consumer_token_config_item_reads_fail_closed_without_namespace_scope() {
             "--target-env",
             "FAT",
         ],
+        vec!["--output", "json", "env", "list", "--app", "demo"],
+        vec![
+            "--output",
+            "json",
+            "namespace",
+            "list",
+            "--env",
+            "DEV",
+            "--app",
+            "demo",
+        ],
+        vec![
+            "--output",
+            "json",
+            "namespace",
+            "get",
+            "--env",
+            "DEV",
+            "--app",
+            "demo",
+            "application",
+        ],
     ] {
         let assert = base_command(&home)
             .env("APOLLO_TOKEN", "consumer-token")
@@ -616,7 +484,7 @@ fn consumer_token_config_item_reads_fail_closed_without_namespace_scope() {
         let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf8 stderr");
         let json: Value = serde_json::from_str(&stderr).expect("json stderr");
         assert_eq!(json["error"]["code"], "invalid_input");
-        assert!(stderr.contains("consumer-token mode cannot safely verify namespace scope"));
+        assert!(stderr.contains("consumer-token mode cannot safely verify"));
     }
 
     server.assert_no_request();
@@ -624,19 +492,12 @@ fn consumer_token_config_item_reads_fail_closed_without_namespace_scope() {
 
 #[test]
 fn namespace_config_and_release_commands_map_to_openapi_paths() {
-    let namespace_server = TestServer::sequence(vec![
-        (200, "application/json", r#"[{"appId":"demo"}]"#),
-        (
-            200,
-            "application/json",
-            r#"[{"namespaceName":"application"}]"#,
-        ),
-    ]);
+    let namespace_server = TestServer::json(r#"[{"namespaceName":"application"}]"#);
     let home = temp_home();
     write_config(&home, &profile_config(&namespace_server.url()));
 
     base_command(&home)
-        .env("APOLLO_TOKEN", "consumer-token")
+        .env("APOLLO_TOKEN", "apollo_pat_test_token")
         .args([
             "--output",
             "json",
@@ -649,20 +510,15 @@ fn namespace_config_and_release_commands_map_to_openapi_paths() {
         ])
         .assert()
         .success();
-    let requests = namespace_server.requests(2);
-    assert_eq!(requests[0].path, "/openapi/v1/apps/authorized");
     assert_eq!(
-        requests[1].path,
+        namespace_server.request().path,
         "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces"
     );
 
-    let namespace_get_server = TestServer::sequence(vec![
-        (200, "application/json", r#"[{"appId":"demo"}]"#),
-        (200, "application/json", r#"{"namespaceName":"settings"}"#),
-    ]);
+    let namespace_get_server = TestServer::json(r#"{"namespaceName":"settings"}"#);
     write_config(&home, &profile_config(&namespace_get_server.url()));
     base_command(&home)
-        .env("APOLLO_TOKEN", "consumer-token")
+        .env("APOLLO_TOKEN", "apollo_pat_test_token")
         .args([
             "--output",
             "json",
@@ -676,10 +532,8 @@ fn namespace_config_and_release_commands_map_to_openapi_paths() {
         ])
         .assert()
         .success();
-    let requests = namespace_get_server.requests(2);
-    assert_eq!(requests[0].path, "/openapi/v1/apps/authorized");
     assert_eq!(
-        requests[1].path,
+        namespace_get_server.request().path,
         "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/settings"
     );
 
@@ -2091,12 +1945,7 @@ fn namespace_create_rejects_private_create_for_existing_public_appnamespace() {
 fn namespace_create_with_public_flag_sends_public_namespace_payload() {
     let server = TestServer::sequence(vec![
         (404, "application/json", r#"{"message":"not found"}"#),
-        (200, "application/json", "[]"),
-        (
-            200,
-            "application/json",
-            r#"{"name":"public.application.yml"}"#,
-        ),
+        (200, "application/json", r#"{"name":"application.yml"}"#),
         (200, "application/json", "{}"),
     ]);
     let home = temp_home();
@@ -2126,22 +1975,19 @@ fn namespace_create_with_public_flag_sends_public_namespace_payload() {
         .assert()
         .success();
 
-    let requests = server.requests(4);
+    let requests = server.requests(3);
     assert_eq!(requests[0].method, "GET");
     assert_eq!(
         requests[0].path,
         "/openapi/v1/apps/demo/appnamespaces/application.yml"
     );
 
-    assert_eq!(requests[1].method, "GET");
-    assert_eq!(requests[1].path, "/openapi/v1/apps/demo/appnamespaces");
-
-    assert_eq!(requests[2].method, "POST");
+    assert_eq!(requests[1].method, "POST");
     assert_eq!(
-        requests[2].path,
+        requests[1].path,
         "/openapi/v1/apps/demo/appnamespaces?appendNamespacePrefix=false"
     );
-    let app_namespace_body: Value = serde_json::from_str(&requests[2].body).expect("json body");
+    let app_namespace_body: Value = serde_json::from_str(&requests[1].body).expect("json body");
     assert_eq!(app_namespace_body["appId"], "demo");
     assert_eq!(app_namespace_body["name"], "application");
     assert_eq!(app_namespace_body["format"], "yml");
@@ -2150,19 +1996,16 @@ fn namespace_create_with_public_flag_sends_public_namespace_payload() {
     assert_eq!(app_namespace_body["comment"], "shared settings");
     assert_eq!(app_namespace_body["dataChangeCreatedBy"], "apollo-bot");
 
-    assert_eq!(requests[3].method, "POST");
+    assert_eq!(requests[2].method, "POST");
     assert_eq!(
-        requests[3].path,
+        requests[2].path,
         "/openapi/v1/namespaces?operator=apollo-bot"
     );
-    let namespace_body: Value = serde_json::from_str(&requests[3].body).expect("json body");
+    let namespace_body: Value = serde_json::from_str(&requests[2].body).expect("json body");
     assert_eq!(namespace_body[0]["appId"], "demo");
     assert_eq!(namespace_body[0]["env"], "DEV");
     assert_eq!(namespace_body[0]["clusterName"], "default");
-    assert_eq!(
-        namespace_body[0]["appNamespaceName"],
-        "public.application.yml"
-    );
+    assert_eq!(namespace_body[0]["appNamespaceName"], "application.yml");
 }
 
 #[test]

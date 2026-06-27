@@ -348,6 +348,53 @@ key = "old-dev"
     assert!(credential_file_path(&home, "dev").exists());
 }
 
+#[cfg(unix)]
+#[test]
+fn auth_login_keeps_replaced_file_credential_when_config_save_fails() {
+    let home = temp_home();
+    write_config(
+        &home,
+        r#"
+active_profile = "dev"
+
+[profiles.dev]
+server = "https://apollo-dev.example.com"
+
+[profiles.dev.credential]
+backend = "file"
+key = "old-dev"
+"#,
+    );
+    fs::create_dir_all(
+        credential_file_path(&home, "old-dev")
+            .parent()
+            .expect("parent"),
+    )
+    .expect("credential dir");
+    fs::write(credential_file_path(&home, "old-dev"), "old-secret\n").expect("old credential");
+    fs::set_permissions(config_path(&home), fs::Permissions::from_mode(0o400))
+        .expect("make config read-only");
+
+    let assert = base_command(&home)
+        .write_stdin("apollo_pat_test_token\n")
+        .args([
+            "--output",
+            "json",
+            "auth",
+            "login",
+            "--token-stdin",
+            "--store-token-in-file",
+        ])
+        .assert()
+        .failure();
+
+    assert!(assert.get_output().stdout.is_empty());
+    assert_eq!(
+        fs::read_to_string(credential_file_path(&home, "old-dev")).expect("old credential"),
+        "old-secret\n"
+    );
+}
+
 #[test]
 fn auth_login_user_token_clears_existing_operator() {
     let home = temp_home();

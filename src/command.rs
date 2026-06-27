@@ -192,15 +192,11 @@ fn execute_auth(
                 is_interactive_terminal(),
                 writer_output,
             )?;
-            delete_replaced_credential(
-                &loaded.path,
-                replaced_credential_to_delete(
-                    &profile,
-                    loaded.config.profiles.get(&profile),
-                    &credential_ref,
-                ),
-                writer_output,
-            )?;
+            let replaced_credential = replaced_credential_to_delete(
+                &profile,
+                loaded.config.profiles.get(&profile),
+                &credential_ref,
+            );
 
             let mut config = loaded.config.clone();
             let profile_config = config
@@ -213,6 +209,7 @@ fn execute_auth(
             }
             profile_config.credential = Some(credential_ref.clone());
             save_config(&loaded.path, &config, writer_output)?;
+            delete_replaced_credential(&loaded.path, replaced_credential, writer_output)?;
 
             let response = AuthLoginResponse {
                 stored: true,
@@ -430,12 +427,10 @@ fn execute_profile_setup(
             )
         })
         .transpose()?;
+    let replaced_credential = credential.as_ref().and_then(|credential| {
+        replaced_credential_to_delete(&profile_name, existing_profile, credential)
+    });
     if let Some(credential) = credential.clone() {
-        delete_replaced_credential(
-            &loaded.path,
-            replaced_credential_to_delete(&profile_name, existing_profile, &credential),
-            writer_output,
-        )?;
         profile_config.credential = Some(credential);
     }
 
@@ -450,6 +445,7 @@ fn execute_profile_setup(
         config.active_profile = Some(profile_name.clone());
     }
     save_config(&loaded.path, &config, writer_output)?;
+    delete_replaced_credential(&loaded.path, replaced_credential, writer_output)?;
     let response_credential = config
         .profiles
         .get(&profile_name)
@@ -522,7 +518,7 @@ fn execute_env(
     let openapi = openapi_context(cli, output)?;
     match command {
         EnvCommand::List { app } => {
-            ensure_consumer_token_app_authorized(&openapi, &app)?;
+            ensure_consumer_token_scoped_read_supported(&openapi, "env list")?;
             let path = format!("/openapi/v1/apps/{}/envclusters", encode_path_segment(&app));
             openapi.request("GET", &path, None)
         }
@@ -540,7 +536,7 @@ fn execute_namespace(
     let openapi = openapi_context(cli, output)?;
     match command {
         NamespaceCommand::List { scope } => {
-            ensure_consumer_token_app_authorized(&openapi, &scope.app)?;
+            ensure_consumer_token_scoped_read_supported(&openapi, "namespace list")?;
             let path = cluster_namespaces_path(&scope.env, &scope.app, &scope.cluster);
             let response = openapi.client.request("GET", &path, None)?;
             let data = redact_nested_item_values(response.data.clone());
@@ -551,7 +547,7 @@ fn execute_namespace(
             ))
         }
         NamespaceCommand::Get { scope, namespace } => {
-            ensure_consumer_token_app_authorized(&openapi, &scope.app)?;
+            ensure_consumer_token_scoped_read_supported(&openapi, "namespace get")?;
             let path = namespace_path(&NamespaceScopeArgs {
                 cluster_scope: scope,
                 namespace,
@@ -679,8 +675,9 @@ fn register_app_namespace(
     let registration = app_namespace_registration(namespace_name);
     if let Some(existing) = find_app_namespace(openapi, app_id, namespace_name)? {
         if public_namespace && matches!(existing.is_public, Some(false)) {
-            if let Some(existing) =
-                find_prefixed_public_app_namespace(openapi, app_id, &registration)?
+            if append_namespace_prefix
+                && let Some(existing) =
+                    find_prefixed_public_app_namespace(openapi, app_id, &registration)?
             {
                 return Ok(RegisteredAppNamespace {
                     name: existing.name,
@@ -704,6 +701,7 @@ fn register_app_namespace(
         });
     }
     if public_namespace
+        && append_namespace_prefix
         && let Some(existing) = find_prefixed_public_app_namespace(openapi, app_id, &registration)?
     {
         return Ok(RegisteredAppNamespace {
@@ -1460,6 +1458,22 @@ fn ensure_config_item_read_supported(openapi: &OpenApiCommandContext) -> Result<
 
     Err(CliError::invalid_input(
         "consumer-token mode cannot safely verify namespace scope for config item reads; use user-token mode for config read, diff, and apply operations",
+        openapi.context.output,
+    ))
+}
+
+fn ensure_consumer_token_scoped_read_supported(
+    openapi: &OpenApiCommandContext,
+    command: &str,
+) -> Result<(), CliError> {
+    if openapi.context.auth_mode.is_user_token() {
+        return Ok(());
+    }
+
+    Err(CliError::invalid_input(
+        &format!(
+            "consumer-token mode cannot safely verify env or namespace scope for `{command}`; use user-token mode for scoped read operations"
+        ),
         openapi.context.output,
     ))
 }

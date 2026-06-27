@@ -213,10 +213,11 @@ OpenAPI commands support two token modes:
 when configuring legacy consumer-token credentials. Mutating commands require a configured
 `operator` only in `consumer-token` mode; user-token requests use the owning Portal user.
 
-`apollo config get`, `apollo config list`, `apollo config diff`, and `apollo config apply` read
-configuration item values before rendering, diffing, or syncing. Use `user-token` mode for these
-commands. Legacy consumer-token mode cannot safely verify namespace-level read scope from the
-available `/openapi/v1/apps/authorized` response, so the CLI rejects these item-read workflows
+`apollo env list`, `apollo namespace list`, `apollo namespace get`, `apollo config get`,
+`apollo config list`, `apollo config diff`, and `apollo config apply` read env, namespace, or
+configuration item data whose scope can be narrower than the app. Use `user-token` mode for these
+commands. Legacy consumer-token mode cannot safely verify env/namespace-level read scope from the
+available `/openapi/v1/apps/authorized` response, so the CLI rejects these scoped-read workflows
 instead of relying on app-level visibility alone.
 
 For local or CI use, `APOLLO_TOKEN` takes precedence and is never written to disk:
