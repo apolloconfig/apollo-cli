@@ -992,12 +992,6 @@ fn namespace_create_does_not_mask_auth_redirect_after_namespace_post() {
             Vec::new(),
         ),
         (302, "text/plain", "", vec![("Location", "/signin")]),
-        (
-            200,
-            "application/json",
-            r#"{"namespaceName":"settings","items":[]}"#,
-            Vec::new(),
-        ),
     ]);
     let home = temp_home();
     write_config(
@@ -1032,9 +1026,60 @@ fn namespace_create_does_not_mask_auth_redirect_after_namespace_post() {
 }
 
 #[test]
+fn namespace_create_rejects_existing_namespace_before_posting() {
+    let server = TestServer::sequence(vec![
+        (200, "application/json", r#"{"name":"settings"}"#),
+        (
+            200,
+            "application/json",
+            r#"{"namespaceName":"settings","items":[]}"#,
+        ),
+    ]);
+    let home = temp_home();
+    write_config(
+        &home,
+        &profile_config_with_operator(&server.url(), "apollo-bot"),
+    );
+
+    base_command(&home)
+        .env("APOLLO_TOKEN", "consumer-token")
+        .args([
+            "--yes",
+            "--output",
+            "json",
+            "namespace",
+            "create",
+            "--env",
+            "DEV",
+            "--app",
+            "demo",
+            "settings",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("namespace already exists"));
+
+    let requests = server.requests(2);
+    assert_eq!(
+        requests[0].path,
+        "/openapi/v1/apps/demo/appnamespaces/settings"
+    );
+    assert_eq!(requests[1].method, "GET");
+    assert_eq!(
+        requests[1].path,
+        "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/settings"
+    );
+}
+
+#[test]
 fn namespace_create_reuses_existing_appnamespace() {
     let server = TestServer::sequence(vec![
         (200, "application/json", r#"{"name":"application"}"#),
+        (
+            404,
+            "application/json",
+            r#"{"message":"namespace not exist"}"#,
+        ),
         (200, "application/json", "{}"),
     ]);
     let home = temp_home();
@@ -1060,18 +1105,24 @@ fn namespace_create_reuses_existing_appnamespace() {
         .assert()
         .success();
 
-    let requests = server.requests(2);
+    let requests = server.requests(3);
     assert_eq!(requests[0].method, "GET");
     assert_eq!(
         requests[0].path,
         "/openapi/v1/apps/demo/appnamespaces/application"
     );
-    assert_eq!(requests[1].method, "POST");
+    assert_eq!(requests[1].method, "GET");
     assert_eq!(
         requests[1].path,
+        "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/application"
+    );
+
+    assert_eq!(requests[2].method, "POST");
+    assert_eq!(
+        requests[2].path,
         "/openapi/v1/namespaces?operator=apollo-bot"
     );
-    let namespace_body: Value = serde_json::from_str(&requests[1].body).expect("json body");
+    let namespace_body: Value = serde_json::from_str(&requests[2].body).expect("json body");
     assert_eq!(namespace_body[0]["appNamespaceName"], "application");
 }
 
@@ -1083,6 +1134,11 @@ fn namespace_create_reuses_existing_prefixed_public_appnamespace() {
             200,
             "application/json",
             r#"[{"name":"FX.application.yml","isPublic":true}]"#,
+        ),
+        (
+            404,
+            "application/json",
+            r#"{"message":"namespace not exist"}"#,
         ),
         (200, "application/json", "{}"),
     ]);
@@ -1110,7 +1166,7 @@ fn namespace_create_reuses_existing_prefixed_public_appnamespace() {
         .assert()
         .success();
 
-    let requests = server.requests(3);
+    let requests = server.requests(4);
     assert_eq!(requests[0].method, "GET");
     assert_eq!(
         requests[0].path,
@@ -1120,12 +1176,18 @@ fn namespace_create_reuses_existing_prefixed_public_appnamespace() {
     assert_eq!(requests[1].method, "GET");
     assert_eq!(requests[1].path, "/openapi/v1/apps/demo/appnamespaces");
 
-    assert_eq!(requests[2].method, "POST");
+    assert_eq!(requests[2].method, "GET");
     assert_eq!(
         requests[2].path,
+        "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/FX.application.yml"
+    );
+
+    assert_eq!(requests[3].method, "POST");
+    assert_eq!(
+        requests[3].path,
         "/openapi/v1/namespaces?operator=apollo-bot"
     );
-    let namespace_body: Value = serde_json::from_str(&requests[2].body).expect("json body");
+    let namespace_body: Value = serde_json::from_str(&requests[3].body).expect("json body");
     assert_eq!(namespace_body[0]["appNamespaceName"], "FX.application.yml");
 }
 

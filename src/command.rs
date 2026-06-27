@@ -537,13 +537,20 @@ fn execute_namespace(
                 &openapi.context,
                 openapi.context.output,
             )?;
-            let app_namespace_name = register_app_namespace(
+            let app_namespace = register_app_namespace(
                 &openapi,
                 &scope.app,
                 &name,
                 public_namespace,
                 operator.as_deref(),
             )?;
+            let namespace_scope = NamespaceScopeArgs {
+                cluster_scope: scope.clone(),
+                namespace: app_namespace.name.clone(),
+            };
+            if !app_namespace.created {
+                ensure_namespace_absent(&openapi, &namespace_scope)?;
+            }
             let path = append_optional_query(
                 "/openapi/v1/namespaces".to_owned(),
                 "operator",
@@ -553,15 +560,11 @@ fn execute_namespace(
                 "appId": &scope.app,
                 "env": &scope.env,
                 "clusterName": &scope.cluster,
-                "appNamespaceName": &app_namespace_name,
+                "appNamespaceName": &app_namespace.name,
             }]);
             match openapi.request("POST", &path, Some(body)) {
                 Ok(output) => Ok(output),
                 Err(error) if is_namespace_create_reported_failed(&error) => {
-                    let namespace_scope = NamespaceScopeArgs {
-                        cluster_scope: scope,
-                        namespace: app_namespace_name,
-                    };
                     match openapi
                         .client
                         .request("GET", &namespace_path(&namespace_scope), None)
@@ -576,9 +579,37 @@ fn execute_namespace(
     }
 }
 
+fn ensure_namespace_absent(
+    openapi: &OpenApiCommandContext,
+    namespace_scope: &NamespaceScopeArgs,
+) -> Result<(), CliError> {
+    match openapi
+        .client
+        .request("GET", &namespace_path(namespace_scope), None)
+    {
+        Ok(_) => Err(CliError::invalid_input(
+            &format!(
+                "namespace already exists: app={} env={} cluster={} namespace={}",
+                namespace_scope.cluster_scope.app,
+                namespace_scope.cluster_scope.env,
+                namespace_scope.cluster_scope.cluster,
+                namespace_scope.namespace
+            ),
+            openapi.context.output,
+        )),
+        Err(error) if is_missing_namespace(&error) => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 struct AppNamespaceRegistration {
     name: String,
     format: &'static str,
+}
+
+struct RegisteredAppNamespace {
+    name: String,
+    created: bool,
 }
 
 fn register_app_namespace(
@@ -587,7 +618,7 @@ fn register_app_namespace(
     namespace_name: &str,
     public_namespace: bool,
     operator: Option<&str>,
-) -> Result<String, CliError> {
+) -> Result<RegisteredAppNamespace, CliError> {
     let registration = app_namespace_registration(namespace_name);
     if let Some(existing) = find_app_namespace(openapi, app_id, namespace_name)? {
         if public_namespace && matches!(existing.is_public, Some(false)) {
@@ -602,12 +633,18 @@ fn register_app_namespace(
                 openapi.context.output,
             ));
         }
-        return Ok(existing.name);
+        return Ok(RegisteredAppNamespace {
+            name: existing.name,
+            created: false,
+        });
     }
     if public_namespace
         && let Some(existing) = find_prefixed_public_app_namespace(openapi, app_id, &registration)?
     {
-        return Ok(existing.name);
+        return Ok(RegisteredAppNamespace {
+            name: existing.name,
+            created: false,
+        });
     }
 
     let path = format!(
@@ -624,12 +661,15 @@ fn register_app_namespace(
         body["dataChangeCreatedBy"] = json!(operator);
     }
     let response = openapi.client.request("POST", &path, Some(body))?;
-    Ok(response
-        .data
-        .get("name")
-        .and_then(Value::as_str)
-        .unwrap_or(namespace_name)
-        .to_owned())
+    Ok(RegisteredAppNamespace {
+        name: response
+            .data
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or(namespace_name)
+            .to_owned(),
+        created: true,
+    })
 }
 
 struct ExistingAppNamespace {
@@ -726,6 +766,15 @@ fn is_missing_app_namespace(error: &CliError) -> bool {
             && error
                 .http_status_message()
                 .is_some_and(|message| message.contains("appNamespace not exist")))
+}
+
+fn is_missing_namespace(error: &CliError) -> bool {
+    matches!(error.http_status_code(), Some(404))
+        || (matches!(error.http_status_code(), Some(400))
+            && error.http_status_message().is_some_and(|message| {
+                message.contains("namespace not exist")
+                    && !message.contains("appNamespace not exist")
+            }))
 }
 
 fn is_namespace_create_reported_failed(error: &CliError) -> bool {
