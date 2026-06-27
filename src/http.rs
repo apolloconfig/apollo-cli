@@ -255,6 +255,7 @@ fn normalize_openapi_path(path: &str, format: OutputFormat) -> Result<String, Cl
     } else {
         format!("/{}", path)
     };
+    reject_dot_segments(&path, format)?;
     if path == "/openapi/v1" || path.starts_with("/openapi/v1/") {
         Ok(path)
     } else {
@@ -263,4 +264,20 @@ fn normalize_openapi_path(path: &str, format: OutputFormat) -> Result<String, Cl
             format,
         ))
     }
+}
+
+fn reject_dot_segments(path: &str, format: OutputFormat) -> Result<(), CliError> {
+    let path_without_query = path.split('?').next().unwrap_or(path);
+    for segment in path_without_query.split('/') {
+        let decoded = urlencoding::decode(segment).map_err(|_| {
+            CliError::invalid_input("OpenAPI path contains invalid percent-encoding", format)
+        })?;
+        if decoded == "." || decoded == ".." {
+            return Err(CliError::invalid_input(
+                "OpenAPI path must not contain . or .. path segments",
+                format,
+            ));
+        }
+    }
+    Ok(())
 }

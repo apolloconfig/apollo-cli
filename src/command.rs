@@ -703,10 +703,17 @@ fn register_app_namespace(
         });
     }
 
-    let path = format!(
+    let mut path = format!(
         "/openapi/v1/apps/{}/appnamespaces",
         encode_path_segment(app_id)
     );
+    if public_namespace {
+        path = append_query(
+            path,
+            "appendNamespacePrefix",
+            &append_namespace_prefix.to_string(),
+        );
+    }
     let mut body = json!({
         "appId": app_id,
         "name": registration.name,
@@ -876,6 +883,7 @@ fn execute_config(
     let openapi = openapi_context(cli, output)?;
     match command {
         ConfigCommand::List { scope, page, size } => {
+            ensure_consumer_token_app_authorized(&openapi, &scope.cluster_scope.app)?;
             let mut path = format!("{}/items", namespace_path(&scope));
             path = append_query(path, "page", &page.unwrap_or(DEFAULT_PAGE).to_string());
             path = append_query(path, "size", &size.unwrap_or(DEFAULT_PAGE_SIZE).to_string());
