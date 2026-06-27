@@ -31,7 +31,7 @@ impl ProfileConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct CredentialRef {
     pub backend: String,
     pub key: String,

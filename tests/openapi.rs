@@ -232,7 +232,7 @@ active_profile = "missing"
     let json: Value = serde_json::from_str(&stdout).expect("json stdout");
 
     assert_eq!(json["data"][0]["appId"], "demo");
-    assert_eq!(server.request().path, "/openapi/v1/apps");
+    assert_eq!(server.request().path, "/openapi/v1/apps/authorized");
 }
 
 #[test]
@@ -275,7 +275,20 @@ fn app_and_env_commands_call_openapi_endpoints() {
         .assert()
         .success()
         .stdout(predicate::str::contains(r#""appId": "demo""#));
-    assert_eq!(app_server.request().path, "/openapi/v1/apps");
+    assert_eq!(app_server.request().path, "/openapi/v1/apps/authorized");
+
+    let app_ids_server = TestServer::json(r#"[{"appId":"demo"}]"#);
+    write_config(&home, &profile_config(&app_ids_server.url()));
+    base_command(&home)
+        .env("APOLLO_TOKEN", "consumer-token")
+        .args(["--output", "json", "app", "list", "--app-ids", "demo"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""appId": "demo""#));
+    assert_eq!(
+        app_ids_server.request().path,
+        "/openapi/v1/apps?appIds=demo"
+    );
 
     let app_get_server = TestServer::json(r#"{"appId":"demo"}"#);
     write_config(&home, &profile_config(&app_get_server.url()));

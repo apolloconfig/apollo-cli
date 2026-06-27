@@ -790,7 +790,40 @@ key = "dev"
 }
 
 #[test]
-fn profile_add_overwrite_disables_implicit_native_credential_without_new_token() {
+fn init_overwrite_preserves_existing_server_and_operator_without_new_values() {
+    let home = temp_home();
+    write_config(
+        &home,
+        r#"
+active_profile = "local"
+
+[profiles.local]
+server = "https://apollo-existing.example.com"
+auth_mode = "consumer-token"
+operator = "existing-operator"
+
+[profiles.local.credential]
+backend = "file"
+key = "local"
+"#,
+    );
+
+    let assert = base_command(&home)
+        .args(["init", "--overwrite", "--auth-mode", "consumer-token"])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    assert!(stdout.contains("Server: https://apollo-existing.example.com"));
+    assert!(stdout.contains("Operator: existing-operator"));
+
+    let config = fs::read_to_string(config_path(&home)).expect("config file");
+    assert!(config.contains("server = \"https://apollo-existing.example.com\""));
+    assert!(config.contains("operator = \"existing-operator\""));
+}
+
+#[test]
+fn profile_add_overwrite_preserves_implicit_native_credential_without_new_token() {
     let home = temp_home();
     write_config(
         &home,
@@ -817,12 +850,12 @@ operator = "apollo-bot"
         .success();
 
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
-    assert!(stdout.contains("Credential backend: none"));
+    assert!(!stdout.contains("Credential backend: none"));
 
     let config = fs::read_to_string(config_path(&home)).expect("config file");
     assert!(config.contains("server = \"https://apollo-new.example.com\""));
-    assert!(config.contains("backend = \"none\""));
-    assert!(config.contains("key = \"dev\""));
+    assert!(!config.contains("[profiles.dev.credential]"));
+    assert!(!config.contains("backend = \"none\""));
 }
 
 #[test]

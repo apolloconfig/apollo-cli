@@ -183,6 +183,11 @@ fn execute_auth(
                 AuthMode::UserToken,
                 writer_output,
             )?;
+            let previous_credential = loaded
+                .config
+                .profiles
+                .get(&profile)
+                .and_then(|profile| profile.credential.clone());
 
             let credential_ref = store_setup_token(
                 &loaded.path,
@@ -192,6 +197,13 @@ fn execute_auth(
                 is_interactive_terminal(),
                 writer_output,
             )?;
+            if let Some(previous_credential) = previous_credential
+                && previous_credential != credential_ref
+            {
+                credential::delete(&loaded.path, &previous_credential).map_err(|error| {
+                    CliError::credential_store_unavailable(&error, writer_output)
+                })?;
+            }
 
             let mut config = loaded.config.clone();
             let profile_config = config
@@ -365,7 +377,7 @@ fn execute_profile_setup(
     }
 
     let existing_profile = loaded.config.profiles.get(&profile_name);
-    let server = resolve_setup_server(&options, cli, interactive, writer_output)?;
+    let server = resolve_setup_server(&options, cli, existing_profile, interactive, writer_output)?;
     let profile_output = cli
         .global
         .output
@@ -385,26 +397,27 @@ fn execute_profile_setup(
         AuthMode::UserToken,
         writer_output,
     )?;
-    let operator = resolve_setup_operator(&options, auth_mode, interactive, writer_output)?
-        .or_else(|| {
-            (!auth_mode.is_user_token())
-                .then(|| {
-                    existing_profile
-                        .and_then(|profile| profile.operator.clone().and_then(non_blank))
-                })
-                .flatten()
-        });
+    let operator = resolve_setup_operator(
+        &options,
+        auth_mode,
+        existing_profile,
+        interactive,
+        writer_output,
+    )?
+    .or_else(|| {
+        (!auth_mode.is_user_token())
+            .then(|| {
+                existing_profile.and_then(|profile| profile.operator.clone().and_then(non_blank))
+            })
+            .flatten()
+    });
 
     let mut profile_config = ProfileConfig {
         server: Some(server.clone()),
         output: profile_output,
         auth_mode: Some(auth_mode),
         operator: operator.clone(),
-        credential: preserved_setup_credential(
-            &profile_name,
-            existing_profile,
-            setup_token.as_ref(),
-        ),
+        credential: preserved_setup_credential(existing_profile, setup_token.as_ref()),
     };
 
     let credential = setup_token
@@ -466,11 +479,12 @@ fn execute_app(
     let openapi = openapi_context(cli, output)?;
     let path = match command {
         AppCommand::List { app_ids } => {
-            let path = "/openapi/v1/apps".to_owned();
             if let Some(app_ids) = app_ids {
-                append_query(path, "appIds", &app_ids)
+                append_query("/openapi/v1/apps".to_owned(), "appIds", &app_ids)
+            } else if openapi.context.auth_mode.is_user_token() {
+                "/openapi/v1/apps".to_owned()
             } else {
-                path
+                "/openapi/v1/apps/authorized".to_owned()
             }
         }
         AppCommand::Get { app_id } => {
@@ -1475,6 +1489,7 @@ fn resolve_setup_profile_name(
 fn resolve_setup_server(
     options: &ProfileSetupOptions,
     cli: &Cli,
+    existing_profile: Option<&ProfileConfig>,
     interactive: bool,
     output: OutputFormat,
 ) -> Result<String, CliError> {
@@ -1483,6 +1498,13 @@ fn resolve_setup_server(
         .clone()
         .and_then(non_blank)
         .or_else(|| std::env::var("APOLLO_SERVER").ok().and_then(non_blank))
+        .or_else(|| {
+            if options.overwrite {
+                existing_profile.and_then(|profile| profile.server.clone().and_then(non_blank))
+            } else {
+                None
+            }
+        })
         .or_else(|| match options.mode {
             ProfileSetupMode::Init => Some(DEFAULT_INIT_SERVER.to_owned()),
             ProfileSetupMode::Add => None,
@@ -1503,6 +1525,7 @@ fn resolve_setup_server(
 fn resolve_setup_operator(
     options: &ProfileSetupOptions,
     auth_mode: AuthMode,
+    existing_profile: Option<&ProfileConfig>,
     interactive: bool,
     output: OutputFormat,
 ) -> Result<Option<String>, CliError> {
@@ -1517,6 +1540,12 @@ fn resolve_setup_operator(
     }
     if auth_mode.is_user_token() {
         return Ok(None);
+    }
+    if options.overwrite
+        && let Some(operator) =
+            existing_profile.and_then(|profile| profile.operator.clone().and_then(non_blank))
+    {
+        return Ok(Some(operator));
     }
     if matches!(options.mode, ProfileSetupMode::Init) {
         return Ok(Some(DEFAULT_INIT_OPERATOR.to_owned()));
@@ -1554,7 +1583,6 @@ fn reject_auth_mode_change_without_token(
 }
 
 fn preserved_setup_credential(
-    profile_name: &str,
     existing_profile: Option<&ProfileConfig>,
     token: Option<&Sensitive>,
 ) -> Option<CredentialRef> {
@@ -1562,17 +1590,7 @@ fn preserved_setup_credential(
     if token.is_some() {
         return existing_profile.credential.clone();
     }
-    existing_profile
-        .credential
-        .clone()
-        .or_else(|| Some(disabled_credential(profile_name)))
-}
-
-fn disabled_credential(profile_name: &str) -> CredentialRef {
-    CredentialRef {
-        backend: "none".to_owned(),
-        key: profile_name.to_owned(),
-    }
+    existing_profile.credential.clone()
 }
 
 fn resolve_auth_mode(
