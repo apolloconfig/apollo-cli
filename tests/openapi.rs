@@ -408,29 +408,73 @@ fn consumer_token_scoped_read_commands_check_authorized_apps() {
     assert_eq!(requests[0].path, "/openapi/v1/apps/authorized");
     assert_eq!(requests[1].path, "/openapi/v1/apps/demo/envclusters");
 
-    let config_server = TestServer::sequence(vec![
+    let namespace_list_server = TestServer::sequence(vec![
         (200, "application/json", r#"[{"appId":"demo"}]"#),
         (
             200,
             "application/json",
-            r#"{"key":"timeout","value":"3000"}"#,
+            r#"[{"namespaceName":"application"}]"#,
         ),
     ]);
-    write_config(&home, &profile_config(&config_server.url()));
+    write_config(&home, &profile_config(&namespace_list_server.url()));
     base_command(&home)
         .env("APOLLO_TOKEN", "consumer-token")
         .args([
-            "--output", "json", "config", "get", "--env", "DEV", "--app", "demo", "timeout",
+            "--output",
+            "json",
+            "namespace",
+            "list",
+            "--env",
+            "DEV",
+            "--app",
+            "demo",
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains(r#""value": "3000""#));
+        .stdout(predicate::str::contains(
+            r#""namespaceName": "application""#,
+        ));
 
-    let requests = config_server.requests(2);
+    let requests = namespace_list_server.requests(2);
     assert_eq!(requests[0].path, "/openapi/v1/apps/authorized");
     assert_eq!(
         requests[1].path,
-        "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/application/items/timeout"
+        "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces"
+    );
+
+    let namespace_get_server = TestServer::sequence(vec![
+        (200, "application/json", r#"[{"appId":"demo"}]"#),
+        (
+            200,
+            "application/json",
+            r#"{"namespaceName":"application"}"#,
+        ),
+    ]);
+    write_config(&home, &profile_config(&namespace_get_server.url()));
+    base_command(&home)
+        .env("APOLLO_TOKEN", "consumer-token")
+        .args([
+            "--output",
+            "json",
+            "namespace",
+            "get",
+            "--env",
+            "DEV",
+            "--app",
+            "demo",
+            "application",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            r#""namespaceName": "application""#,
+        ));
+
+    let requests = namespace_get_server.requests(2);
+    assert_eq!(requests[0].path, "/openapi/v1/apps/authorized");
+    assert_eq!(
+        requests[1].path,
+        "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/application"
     );
 }
 
@@ -466,28 +510,19 @@ fn consumer_token_scoped_read_commands_reject_unauthorized_apps() {
     assert!(stderr.contains("not authorized"));
     assert_eq!(env_server.request().path, "/openapi/v1/apps/authorized");
 
-    let config_server = TestServer::json(r#"[{"appId":"other"}]"#);
-    write_config(&home, &profile_config(&config_server.url()));
+    let namespace_server = TestServer::json(r#"[{"appId":"other"}]"#);
+    write_config(&home, &profile_config(&namespace_server.url()));
     let assert = base_command(&home)
         .env("APOLLO_TOKEN", "consumer-token")
         .args([
-            "--output", "json", "config", "get", "--env", "DEV", "--app", "demo", "timeout",
-        ])
-        .assert()
-        .failure();
-    assert!(assert.get_output().stdout.is_empty());
-    let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf8 stderr");
-    let json: Value = serde_json::from_str(&stderr).expect("json stderr");
-    assert_eq!(json["error"]["code"], "invalid_input");
-    assert!(stderr.contains("not authorized"));
-    assert_eq!(config_server.request().path, "/openapi/v1/apps/authorized");
-
-    let config_list_server = TestServer::json(r#"[{"appId":"other"}]"#);
-    write_config(&home, &profile_config(&config_list_server.url()));
-    let assert = base_command(&home)
-        .env("APOLLO_TOKEN", "consumer-token")
-        .args([
-            "--output", "json", "config", "list", "--env", "DEV", "--app", "demo",
+            "--output",
+            "json",
+            "namespace",
+            "list",
+            "--env",
+            "DEV",
+            "--app",
+            "demo",
         ])
         .assert()
         .failure();
@@ -497,14 +532,106 @@ fn consumer_token_scoped_read_commands_reject_unauthorized_apps() {
     assert_eq!(json["error"]["code"], "invalid_input");
     assert!(stderr.contains("not authorized"));
     assert_eq!(
-        config_list_server.request().path,
+        namespace_server.request().path,
+        "/openapi/v1/apps/authorized"
+    );
+
+    let namespace_get_server = TestServer::json(r#"[{"appId":"other"}]"#);
+    write_config(&home, &profile_config(&namespace_get_server.url()));
+    let assert = base_command(&home)
+        .env("APOLLO_TOKEN", "consumer-token")
+        .args([
+            "--output",
+            "json",
+            "namespace",
+            "get",
+            "--env",
+            "DEV",
+            "--app",
+            "demo",
+            "application",
+        ])
+        .assert()
+        .failure();
+    assert!(assert.get_output().stdout.is_empty());
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf8 stderr");
+    let json: Value = serde_json::from_str(&stderr).expect("json stderr");
+    assert_eq!(json["error"]["code"], "invalid_input");
+    assert!(stderr.contains("not authorized"));
+    assert_eq!(
+        namespace_get_server.request().path,
         "/openapi/v1/apps/authorized"
     );
 }
 
 #[test]
+fn consumer_token_config_item_reads_fail_closed_without_namespace_scope() {
+    let server = TestServer::empty();
+    let home = temp_home();
+    write_config(
+        &home,
+        &profile_config_with_operator(&server.url(), "apollo-bot"),
+    );
+
+    for args in [
+        vec![
+            "--output", "json", "config", "get", "--env", "DEV", "--app", "demo", "timeout",
+        ],
+        vec![
+            "--output", "json", "config", "list", "--env", "DEV", "--app", "demo",
+        ],
+        vec![
+            "--output",
+            "json",
+            "config",
+            "diff",
+            "--env",
+            "DEV",
+            "--app",
+            "demo",
+            "--target-env",
+            "FAT",
+        ],
+        vec![
+            "--yes",
+            "--output",
+            "json",
+            "config",
+            "apply",
+            "--env",
+            "DEV",
+            "--app",
+            "demo",
+            "--target-env",
+            "FAT",
+        ],
+    ] {
+        let assert = base_command(&home)
+            .env("APOLLO_TOKEN", "consumer-token")
+            .args(args)
+            .assert()
+            .failure();
+
+        assert!(assert.get_output().stdout.is_empty());
+        let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf8 stderr");
+        let json: Value = serde_json::from_str(&stderr).expect("json stderr");
+        assert_eq!(json["error"]["code"], "invalid_input");
+        assert!(stderr.contains("consumer-token mode cannot safely verify namespace scope"));
+    }
+
+    server.assert_no_request();
+}
+
+#[test]
 fn namespace_config_and_release_commands_map_to_openapi_paths() {
-    let namespace_server = TestServer::json(r#"[{"namespaceName":"application"}]"#);
+    let namespace_server = TestServer::sequence(vec![
+        (200, "application/json", r#"[{"appId":"demo"}]"#),
+        (
+            200,
+            "application/json",
+            r#"[{"namespaceName":"application"}]"#,
+        ),
+    ]);
     let home = temp_home();
     write_config(&home, &profile_config(&namespace_server.url()));
 
@@ -522,12 +649,17 @@ fn namespace_config_and_release_commands_map_to_openapi_paths() {
         ])
         .assert()
         .success();
+    let requests = namespace_server.requests(2);
+    assert_eq!(requests[0].path, "/openapi/v1/apps/authorized");
     assert_eq!(
-        namespace_server.request().path,
+        requests[1].path,
         "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces"
     );
 
-    let namespace_get_server = TestServer::json(r#"{"namespaceName":"settings"}"#);
+    let namespace_get_server = TestServer::sequence(vec![
+        (200, "application/json", r#"[{"appId":"demo"}]"#),
+        (200, "application/json", r#"{"namespaceName":"settings"}"#),
+    ]);
     write_config(&home, &profile_config(&namespace_get_server.url()));
     base_command(&home)
         .env("APOLLO_TOKEN", "consumer-token")
@@ -544,54 +676,38 @@ fn namespace_config_and_release_commands_map_to_openapi_paths() {
         ])
         .assert()
         .success();
+    let requests = namespace_get_server.requests(2);
+    assert_eq!(requests[0].path, "/openapi/v1/apps/authorized");
     assert_eq!(
-        namespace_get_server.request().path,
+        requests[1].path,
         "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/settings"
     );
 
-    let config_server = TestServer::sequence(vec![
-        (200, "application/json", r#"[{"appId":"demo"}]"#),
-        (
-            200,
-            "application/json",
-            r#"{"key":"timeout","value":"3000"}"#,
-        ),
-    ]);
+    let config_server = TestServer::json(r#"{"key":"timeout","value":"3000"}"#);
     write_config(&home, &profile_config(&config_server.url()));
     base_command(&home)
-        .env("APOLLO_TOKEN", "consumer-token")
+        .env("APOLLO_TOKEN", "apollo_pat_test_token")
         .args([
             "--output", "json", "config", "get", "--env", "DEV", "--app", "demo", "timeout",
         ])
         .assert()
         .success();
-    let requests = config_server.requests(2);
-    assert_eq!(requests[0].path, "/openapi/v1/apps/authorized");
     assert_eq!(
-        requests[1].path,
+        config_server.request().path,
         "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/application/items/timeout"
     );
 
-    let config_list_server = TestServer::sequence(vec![
-        (200, "application/json", r#"[{"appId":"demo"}]"#),
-        (
-            200,
-            "application/json",
-            r#"{"content":[],"page":0,"size":20,"total":0}"#,
-        ),
-    ]);
+    let config_list_server = TestServer::json(r#"{"content":[],"page":0,"size":20,"total":0}"#);
     write_config(&home, &profile_config(&config_list_server.url()));
     base_command(&home)
-        .env("APOLLO_TOKEN", "consumer-token")
+        .env("APOLLO_TOKEN", "apollo_pat_test_token")
         .args([
             "--output", "json", "config", "list", "--env", "DEV", "--app", "demo",
         ])
         .assert()
         .success();
-    let requests = config_list_server.requests(2);
-    assert_eq!(requests[0].path, "/openapi/v1/apps/authorized");
     assert_eq!(
-        requests[1].path,
+        config_list_server.request().path,
         "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/application/items?page=0&size=20"
     );
 
@@ -612,19 +728,14 @@ fn namespace_config_and_release_commands_map_to_openapi_paths() {
 
 #[test]
 fn list_commands_redact_broad_config_values() {
-    let config_server = TestServer::sequence(vec![
-        (200, "application/json", r#"[{"appId":"demo"}]"#),
-        (
-            200,
-            "application/json",
-            r#"{"content":[{"key":"db.password","value":"s3cr3t"}],"page":0,"size":20,"total":1}"#,
-        ),
-    ]);
+    let config_server = TestServer::json(
+        r#"{"content":[{"key":"db.password","value":"s3cr3t"}],"page":0,"size":20,"total":1}"#,
+    );
     let home = temp_home();
     write_config(&home, &profile_config(&config_server.url()));
 
     let assert = base_command(&home)
-        .env("APOLLO_TOKEN", "consumer-token")
+        .env("APOLLO_TOKEN", "apollo_pat_test_token")
         .args([
             "--output", "json", "config", "list", "--env", "DEV", "--app", "demo",
         ])
@@ -634,10 +745,8 @@ fn list_commands_redact_broad_config_values() {
     let json: Value = serde_json::from_str(&stdout).expect("json stdout");
     assert_eq!(json["data"]["content"][0]["value"], "[REDACTED]");
     assert!(!stdout.contains("s3cr3t"));
-    let requests = config_server.requests(2);
-    assert_eq!(requests[0].path, "/openapi/v1/apps/authorized");
     assert_eq!(
-        requests[1].path,
+        config_server.request().path,
         "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/application/items?page=0&size=20"
     );
 
@@ -646,7 +755,7 @@ fn list_commands_redact_broad_config_values() {
     );
     write_config(&home, &profile_config(&namespace_server.url()));
     let assert = base_command(&home)
-        .env("APOLLO_TOKEN", "consumer-token")
+        .env("APOLLO_TOKEN", "apollo_pat_test_token")
         .args([
             "--output",
             "json",
@@ -690,7 +799,7 @@ fn single_read_commands_redact_broad_config_values() {
     write_config(&home, &profile_config(&namespace_server.url()));
 
     let assert = base_command(&home)
-        .env("APOLLO_TOKEN", "consumer-token")
+        .env("APOLLO_TOKEN", "apollo_pat_test_token")
         .args([
             "--output",
             "json",
@@ -742,10 +851,10 @@ fn single_read_commands_redact_broad_config_values() {
     ]);
     write_config(
         &home,
-        &profile_config_with_operator(&diff_server.url(), "apollo-bot"),
+        &profile_config_with_auth_mode(&diff_server.url(), "user-token"),
     );
     let assert = base_command(&home)
-        .env("APOLLO_TOKEN", "consumer-token")
+        .env("APOLLO_TOKEN", "apollo_pat_test_token")
         .args([
             "--output",
             "json",
@@ -1101,22 +1210,15 @@ fn config_set_with_yes_sends_comment_when_provided() {
 
 #[test]
 fn config_item_commands_use_encoded_items_for_path_sensitive_keys() {
-    let get_server = TestServer::sequence(vec![
-        (200, "application/json", r#"[{"appId":"demo"}]"#),
-        (
-            200,
-            "application/json",
-            r#"{"key":"logging/level","value":"debug"}"#,
-        ),
-    ]);
+    let get_server = TestServer::json(r#"{"key":"logging/level","value":"debug"}"#);
     let home = temp_home();
     write_config(
         &home,
-        &profile_config_with_operator(&get_server.url(), "apollo-bot"),
+        &profile_config_with_auth_mode(&get_server.url(), "user-token"),
     );
 
     base_command(&home)
-        .env("APOLLO_TOKEN", "consumer-token")
+        .env("APOLLO_TOKEN", "apollo_pat_test_token")
         .args([
             "--output",
             "json",
@@ -1130,10 +1232,8 @@ fn config_item_commands_use_encoded_items_for_path_sensitive_keys() {
         ])
         .assert()
         .success();
-    let requests = get_server.requests(2);
-    assert_eq!(requests[0].path, "/openapi/v1/apps/authorized");
     assert_eq!(
-        requests[1].path,
+        get_server.request().path,
         "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/application/encodedItems/bG9nZ2luZy9sZXZlbA"
     );
 
@@ -1395,7 +1495,7 @@ fn namespace_create_recovers_when_server_reports_failure_after_creation() {
         (
             200,
             "application/json",
-            r#"{"namespaceName":"settings","items":[]}"#,
+            r#"{"namespaceName":"settings","items":[{"key":"db.password","value":"s3cr3t"}]}"#,
         ),
     ]);
     let home = temp_home();
@@ -1404,7 +1504,7 @@ fn namespace_create_recovers_when_server_reports_failure_after_creation() {
         &profile_config_with_operator(&server.url(), "apollo-bot"),
     );
 
-    base_command(&home)
+    let assert = base_command(&home)
         .env("APOLLO_TOKEN", "consumer-token")
         .args([
             "--yes",
@@ -1421,6 +1521,10 @@ fn namespace_create_recovers_when_server_reports_failure_after_creation() {
         .assert()
         .success()
         .stdout(predicate::str::contains(r#""namespaceName": "settings""#));
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let json: Value = serde_json::from_str(&stdout).expect("json stdout");
+    assert_eq!(json["data"]["items"][0]["value"], "[REDACTED]");
+    assert!(!stdout.contains("s3cr3t"));
 
     let requests = server.requests(4);
     assert_eq!(requests[0].method, "GET");
@@ -1626,6 +1730,47 @@ fn namespace_create_continues_when_user_token_cannot_read_existing_namespace() {
         requests[1].path,
         "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/application"
     );
+    assert_eq!(requests[2].method, "POST");
+    assert_eq!(requests[2].path, "/openapi/v1/namespaces");
+}
+
+#[test]
+fn namespace_create_continues_when_user_token_cannot_read_appnamespace_lookup() {
+    let server = TestServer::sequence(vec![
+        (403, "application/json", r#"{"message":"forbidden"}"#),
+        (200, "application/json", r#"{"name":"settings"}"#),
+        (200, "application/json", "{}"),
+    ]);
+    let home = temp_home();
+    write_config(
+        &home,
+        &profile_config_with_auth_mode(&server.url(), "user-token"),
+    );
+    write_file_credential(&home, "dev", "apollo_pat_stored_token");
+
+    base_command(&home)
+        .args([
+            "--yes",
+            "--output",
+            "json",
+            "namespace",
+            "create",
+            "--env",
+            "DEV",
+            "--app",
+            "demo",
+            "settings",
+        ])
+        .assert()
+        .success();
+
+    let requests = server.requests(3);
+    assert_eq!(
+        requests[0].path,
+        "/openapi/v1/apps/demo/appnamespaces/settings"
+    );
+    assert_eq!(requests[1].method, "POST");
+    assert_eq!(requests[1].path, "/openapi/v1/apps/demo/appnamespaces");
     assert_eq!(requests[2].method, "POST");
     assert_eq!(requests[2].path, "/openapi/v1/namespaces");
 }
@@ -2191,11 +2336,11 @@ fn config_apply_with_yes_uses_synchronize_endpoint() {
     let home = temp_home();
     write_config(
         &home,
-        &profile_config_with_operator(&server.url(), "apollo-bot"),
+        &profile_config_with_auth_mode(&server.url(), "user-token"),
     );
 
     base_command(&home)
-        .env("APOLLO_TOKEN", "consumer-token")
+        .env("APOLLO_TOKEN", "apollo_pat_test_token")
         .args([
             "--yes",
             "--output",
@@ -2221,7 +2366,7 @@ fn config_apply_with_yes_uses_synchronize_endpoint() {
     assert_eq!(requests[1].method, "POST");
     assert_eq!(
         requests[1].path,
-        "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/application/items/synchronize?operator=apollo-bot"
+        "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/application/items/synchronize"
     );
     let body: Value = serde_json::from_str(&requests[1].body).expect("json body");
     assert_eq!(body["syncToNamespaces"][0]["appId"], "demo");
@@ -2281,11 +2426,11 @@ fn config_diff_populates_sync_items_from_source_namespace() {
     let home = temp_home();
     write_config(
         &home,
-        &profile_config_with_operator(&server.url(), "apollo-bot"),
+        &profile_config_with_auth_mode(&server.url(), "user-token"),
     );
 
     base_command(&home)
-        .env("APOLLO_TOKEN", "consumer-token")
+        .env("APOLLO_TOKEN", "apollo_pat_test_token")
         .args([
             "--output",
             "json",
@@ -2323,18 +2468,22 @@ fn config_diff_keeps_source_sync_items_unredacted_while_redacting_output() {
         (
             200,
             "application/json",
-            r#"{"content":[{"key":"token-value","value":"consumer-token"}],"page":0,"size":500,"total":1}"#,
+            r#"{"content":[{"key":"token-value","value":"source-secret"}],"page":0,"size":500,"total":1}"#,
         ),
-        (200, "application/json", r#"{"message":"consumer-token"}"#),
+        (
+            200,
+            "application/json",
+            r#"{"message":"apollo_pat_test_token"}"#,
+        ),
     ]);
     let home = temp_home();
     write_config(
         &home,
-        &profile_config_with_operator(&server.url(), "apollo-bot"),
+        &profile_config_with_auth_mode(&server.url(), "user-token"),
     );
 
     let assert = base_command(&home)
-        .env("APOLLO_TOKEN", "consumer-token")
+        .env("APOLLO_TOKEN", "apollo_pat_test_token")
         .args([
             "--output",
             "json",
@@ -2353,12 +2502,12 @@ fn config_diff_keeps_source_sync_items_unredacted_while_redacting_output() {
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
     let json: Value = serde_json::from_str(&stdout).expect("json stdout");
     assert_eq!(json["data"]["message"], "[REDACTED]");
-    assert!(!stdout.contains("consumer-token"));
+    assert!(!stdout.contains("apollo_pat_test_token"));
 
     let requests = server.requests(2);
     let body: Value = serde_json::from_str(&requests[1].body).expect("json body");
     assert_eq!(body["syncItems"][0]["key"], "token-value");
-    assert_eq!(body["syncItems"][0]["value"], "consumer-token");
+    assert_eq!(body["syncItems"][0]["value"], "source-secret");
 }
 
 #[derive(Debug)]
@@ -2436,6 +2585,15 @@ impl TestServer {
                     .expect("timed out waiting for captured request")
             })
             .collect()
+    }
+
+    fn assert_no_request(self) {
+        assert!(
+            self.request_rx
+                .recv_timeout(Duration::from_millis(100))
+                .is_err(),
+            "expected no OpenAPI request"
+        );
     }
 }
 

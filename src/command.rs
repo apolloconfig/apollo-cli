@@ -540,6 +540,7 @@ fn execute_namespace(
     let openapi = openapi_context(cli, output)?;
     match command {
         NamespaceCommand::List { scope } => {
+            ensure_consumer_token_app_authorized(&openapi, &scope.app)?;
             let path = cluster_namespaces_path(&scope.env, &scope.app, &scope.cluster);
             let response = openapi.client.request("GET", &path, None)?;
             let data = redact_nested_item_values(response.data.clone());
@@ -550,6 +551,7 @@ fn execute_namespace(
             ))
         }
         NamespaceCommand::Get { scope, namespace } => {
+            ensure_consumer_token_app_authorized(&openapi, &scope.app)?;
             let path = namespace_path(&NamespaceScopeArgs {
                 cluster_scope: scope,
                 namespace,
@@ -609,7 +611,14 @@ fn execute_namespace(
                         .client
                         .request("GET", &namespace_path(&namespace_scope), None)
                     {
-                        Ok(response) => Ok(render_openapi_response(&openapi.writer, &response)),
+                        Ok(response) => {
+                            let data = redact_nested_item_values(response.data.clone());
+                            Ok(render_openapi_response_with_data(
+                                &openapi.writer,
+                                &response,
+                                data,
+                            ))
+                        }
                         Err(_) => Err(error),
                     }
                 }
@@ -768,6 +777,7 @@ fn find_app_namespace(
             }))
         }
         Err(error) if is_missing_app_namespace(&error) => Ok(None),
+        Err(error) if is_user_token_read_denied(openapi, &error) => Ok(None),
         Err(error) => Err(error),
     }
 }
@@ -790,6 +800,7 @@ fn find_prefixed_public_app_namespace(
                     && stored_public_app_namespace_matches(&namespace.name, registration)
             })),
         Err(error) if is_missing_app_namespace(&error) => Ok(None),
+        Err(error) if is_user_token_read_denied(openapi, &error) => Ok(None),
         Err(error) => Err(error),
     }
 }
@@ -838,6 +849,10 @@ fn is_missing_app_namespace(error: &CliError) -> bool {
                 .is_some_and(|message| message.contains("appNamespace not exist")))
 }
 
+fn is_user_token_read_denied(openapi: &OpenApiCommandContext, error: &CliError) -> bool {
+    openapi.context.auth_mode.is_user_token() && matches!(error.http_status_code(), Some(403))
+}
+
 fn is_missing_namespace(error: &CliError) -> bool {
     matches!(error.http_status_code(), Some(404))
         || (matches!(error.http_status_code(), Some(400))
@@ -883,7 +898,7 @@ fn execute_config(
     let openapi = openapi_context(cli, output)?;
     match command {
         ConfigCommand::List { scope, page, size } => {
-            ensure_consumer_token_app_authorized(&openapi, &scope.cluster_scope.app)?;
+            ensure_config_item_read_supported(&openapi)?;
             let mut path = format!("{}/items", namespace_path(&scope));
             path = append_query(path, "page", &page.unwrap_or(DEFAULT_PAGE).to_string());
             path = append_query(path, "size", &size.unwrap_or(DEFAULT_PAGE_SIZE).to_string());
@@ -896,7 +911,7 @@ fn execute_config(
             ))
         }
         ConfigCommand::Get { scope, key } => {
-            ensure_consumer_token_app_authorized(&openapi, &scope.cluster_scope.app)?;
+            ensure_config_item_read_supported(&openapi)?;
             let path = item_read_path(&scope, &key);
             openapi.request("GET", &path, None)
         }
@@ -1438,6 +1453,17 @@ fn ensure_consumer_token_app_authorized(
     ))
 }
 
+fn ensure_config_item_read_supported(openapi: &OpenApiCommandContext) -> Result<(), CliError> {
+    if openapi.context.auth_mode.is_user_token() {
+        return Ok(());
+    }
+
+    Err(CliError::invalid_input(
+        "consumer-token mode cannot safely verify namespace scope for config item reads; use user-token mode for config read, diff, and apply operations",
+        openapi.context.output,
+    ))
+}
+
 fn app_id_in_authorized_apps(data: &Value, app_id: &str) -> bool {
     data.as_array()
         .map(|items| items.as_slice())
@@ -1741,6 +1767,8 @@ fn source_sync_items(
     openapi: &OpenApiCommandContext,
     scope: &NamespaceScopeArgs,
 ) -> Result<Vec<Value>, CliError> {
+    ensure_config_item_read_supported(openapi)?;
+
     let mut items = Vec::new();
     let mut page = DEFAULT_PAGE;
 
