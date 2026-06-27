@@ -10,6 +10,8 @@ static AUTHORIZATION_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new("(?i)(authorization\\s*:\\s*(?:bearer\\s+)?)[^\\s]+").unwrap());
 static CONSUMER_TOKEN_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new("(?i)(consumer\\s+token\\s+)[^\\s]+").unwrap());
+static USER_TOKEN_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new("apollo_pat_[A-Za-z0-9._~-]+").unwrap());
 static JSON_SENSITIVE_FIELD_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new("(?i)(\"[^\"]*(?:authorization|token|password|secret)[^\"]*\"\\s*:\\s*\")[^\"]*(\")")
         .unwrap()
@@ -24,6 +26,7 @@ impl Redactor {
         let value = CONSUMER_TOKEN_RE
             .replace_all(&value, format!("${{1}}{}", REDACTED))
             .to_string();
+        let value = USER_TOKEN_RE.replace_all(&value, REDACTED).to_string();
         JSON_SENSITIVE_FIELD_RE
             .replace_all(&value, format!("${{1}}{}${{2}}", REDACTED))
             .to_string()

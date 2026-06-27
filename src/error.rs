@@ -1,5 +1,5 @@
 use crate::cli::OutputFormat;
-use crate::output::{OutputStream, OutputWriter, RenderedOutput, StructuredError};
+use crate::output::{OutputWriter, RenderedOutput, StructuredError};
 
 #[derive(Debug)]
 pub enum CliErrorKind {
@@ -50,10 +50,10 @@ pub struct CliError {
 }
 
 impl CliError {
-    pub fn parse(message: String) -> Self {
+    pub fn parse(message: String, format: OutputFormat) -> Self {
         Self {
             kind: CliErrorKind::Parse { message },
-            format: OutputFormat::Table,
+            format,
         }
     }
 
@@ -184,10 +184,17 @@ impl CliError {
 
     pub fn render(&self) -> RenderedOutput {
         match &self.kind {
-            CliErrorKind::Parse { message } => RenderedOutput {
-                stream: OutputStream::Stderr,
-                body: ensure_trailing_newline(message.clone()),
-            },
+            CliErrorKind::Parse { message } => {
+                OutputWriter::new(self.format).render_error(&StructuredError {
+                    code: "parse_error",
+                    category: "invalid_input",
+                    message: message.clone(),
+                    command: None,
+                    follow_up_issue: Some(5631),
+                    path: None,
+                    profile: None,
+                })
+            }
             CliErrorKind::InvalidConfig { path, message } => OutputWriter::new(self.format)
                 .render_error(&StructuredError {
                     code: "invalid_config",
@@ -317,11 +324,4 @@ fn http_status_code_and_category(status: u16) -> (&'static str, &'static str) {
         400..=499 => ("invalid_input", "invalid_input"),
         _ => ("server_error", "server"),
     }
-}
-
-fn ensure_trailing_newline(mut body: String) -> String {
-    if !body.ends_with('\n') {
-        body.push('\n');
-    }
-    body
 }

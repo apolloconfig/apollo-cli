@@ -12,7 +12,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
-use crate::cli::Cli;
+use crate::cli::{Cli, OutputFormat};
 use crate::command::execute;
 use crate::error::CliError;
 use crate::output::OutputStream;
@@ -46,16 +46,45 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
+    let args = args.into_iter().map(Into::into).collect::<Vec<_>>();
+    let parse_error_output = output_format_from_raw_args(&args)
+        .or_else(output_format_from_env)
+        .unwrap_or(OutputFormat::Table);
     match Cli::try_parse_from(args) {
         Ok(cli) => execute(cli),
         Err(error) => {
             if error.use_stderr() {
-                Err(CliError::parse(error.to_string()))
+                Err(CliError::parse(error.to_string(), parse_error_output))
             } else {
                 Ok(output::RenderedOutput::stdout(error.to_string()))
             }
         }
     }
+}
+
+fn output_format_from_raw_args(args: &[OsString]) -> Option<OutputFormat> {
+    let mut args = args.iter().skip(1);
+    while let Some(arg) = args.next() {
+        let Some(arg) = arg.to_str() else {
+            continue;
+        };
+        if arg == "--output" {
+            return args
+                .next()
+                .and_then(|value| value.to_str())
+                .and_then(OutputFormat::parse);
+        }
+        if let Some(value) = arg.strip_prefix("--output=") {
+            return OutputFormat::parse(value);
+        }
+    }
+    None
+}
+
+fn output_format_from_env() -> Option<OutputFormat> {
+    std::env::var("APOLLO_OUTPUT")
+        .ok()
+        .and_then(|value| OutputFormat::parse(&value))
 }
 
 #[cfg(test)]

@@ -70,6 +70,31 @@ fn openapi_command_without_token_returns_structured_json_error() {
 }
 
 #[test]
+fn parse_errors_redact_token_like_arguments_and_honor_json_output() {
+    let home = temp_home();
+    let assert = base_command(&home)
+        .args([
+            "--output",
+            "json",
+            "auth",
+            "login",
+            "--token-stdin",
+            "apollo_pat_secret_token",
+        ])
+        .assert()
+        .failure();
+
+    assert!(assert.get_output().stdout.is_empty());
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf8 stderr");
+    let json: Value = serde_json::from_str(&stderr).expect("json stderr");
+
+    assert_eq!(json["error"]["code"], "parse_error");
+    assert_eq!(json["error"]["category"], "invalid_input");
+    assert!(stderr.contains("[REDACTED]"));
+    assert!(!stderr.contains("apollo_pat_secret_token"));
+}
+
+#[test]
 fn global_flags_are_accepted_before_subcommands() {
     Command::cargo_bin("apollo")
         .expect("apollo binary")
