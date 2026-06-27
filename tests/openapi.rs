@@ -339,6 +339,28 @@ fn namespace_config_and_release_commands_map_to_openapi_paths() {
         "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces"
     );
 
+    let namespace_get_server = TestServer::json(r#"{"namespaceName":"settings"}"#);
+    write_config(&home, &profile_config(&namespace_get_server.url()));
+    base_command(&home)
+        .env("APOLLO_TOKEN", "consumer-token")
+        .args([
+            "--output",
+            "json",
+            "namespace",
+            "get",
+            "--env",
+            "DEV",
+            "--app",
+            "demo",
+            "settings",
+        ])
+        .assert()
+        .success();
+    assert_eq!(
+        namespace_get_server.request().path,
+        "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/settings"
+    );
+
     let config_server = TestServer::json(r#"{"key":"timeout","value":"3000"}"#);
     write_config(&home, &profile_config(&config_server.url()));
     base_command(&home)

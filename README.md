@@ -44,7 +44,7 @@ apollo app list
 apollo app get sample-app
 apollo env list --app sample-app
 apollo namespace list --env DEV --app sample-app
-apollo namespace get --env DEV --app sample-app --namespace application
+apollo namespace get --env DEV --app sample-app application
 apollo namespace create --env DEV --app sample-app application --yes
 apollo config list --env DEV --app sample-app
 apollo config get --env DEV --app sample-app timeout

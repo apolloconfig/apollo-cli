@@ -156,6 +156,27 @@ fn auth_help_lists_v0_auth_commands() {
 }
 
 #[test]
+fn namespace_get_help_requires_positional_namespace() {
+    Command::cargo_bin("apollo")
+        .expect("apollo binary")
+        .args(["namespace", "get", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("<NAMESPACE>"))
+        .stdout(predicate::str::contains("Namespace name to inspect"));
+}
+
+#[test]
+fn namespace_get_requires_namespace_argument() {
+    let home = temp_home();
+    base_command(&home)
+        .args(["namespace", "get", "--env", "DEV", "--app", "demo"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("<NAMESPACE>"));
+}
+
+#[test]
 fn setup_commands_accept_auth_mode_flag() {
     Command::cargo_bin("apollo")
         .expect("apollo binary")

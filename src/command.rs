@@ -522,8 +522,11 @@ fn execute_namespace(
             let path = cluster_namespaces_path(&scope.env, &scope.app, &scope.cluster);
             openapi.request("GET", &path, None)
         }
-        NamespaceCommand::Get { scope } => {
-            let path = namespace_path(&scope);
+        NamespaceCommand::Get { scope, namespace } => {
+            let path = namespace_path(&NamespaceScopeArgs {
+                cluster_scope: scope,
+                namespace,
+            });
             openapi.request("GET", &path, None)
         }
         NamespaceCommand::Create {

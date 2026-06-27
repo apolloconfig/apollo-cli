@@ -227,7 +227,9 @@ pub enum NamespaceCommand {
     /// Get one namespace and its metadata.
     Get {
         #[command(flatten)]
-        scope: NamespaceScopeArgs,
+        scope: ClusterScopeArgs,
+        #[arg(value_name = "NAMESPACE", help = "Namespace name to inspect")]
+        namespace: String,
     },
     /// Create a namespace in an app environment and cluster.
     Create {
