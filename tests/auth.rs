@@ -87,6 +87,32 @@ fn auth_status_reports_unauthenticated_without_profile_or_token() {
 }
 
 #[test]
+fn auth_status_reports_unauthenticated_with_stale_active_profile() {
+    let home = temp_home();
+    write_config(
+        &home,
+        r#"
+active_profile = "missing"
+"#,
+    );
+
+    let assert = base_command(&home)
+        .args(["--output", "json", "auth", "status"])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let json: Value = serde_json::from_str(&stdout).expect("json stdout");
+
+    assert_eq!(json["authenticated"], false);
+    assert_eq!(json["source"], "none");
+    assert!(json["profile"].is_null());
+    assert!(json["authMode"].is_null());
+    assert!(json["backend"].is_null());
+    assert!(json["key"].is_null());
+}
+
+#[test]
 fn auth_status_reports_environment_token_without_config_home() {
     let home = temp_home();
 

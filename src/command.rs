@@ -112,10 +112,24 @@ fn execute_auth(
             }
 
             let loaded = load_config(output)?;
-            let writer_output = resolve_output(cli, &loaded, output)?;
+            let writer_output = resolve_output(cli, &loaded, output)
+                .unwrap_or_else(|_| output_from_flags_or_env(cli).unwrap_or(output));
             let writer = OutputWriter::new(writer_output);
-            let context = resolve_context(cli, &loaded, output)?;
-            let Some(profile) = context.profile.clone() else {
+            let explicit_profile = cli
+                .global
+                .profile
+                .clone()
+                .and_then(non_blank)
+                .or_else(|| std::env::var("APOLLO_PROFILE").ok().and_then(non_blank));
+            let profile = explicit_profile.clone().or_else(|| {
+                loaded
+                    .config
+                    .active_profile
+                    .clone()
+                    .and_then(non_blank)
+                    .filter(|profile| loaded.config.profiles.contains_key(profile))
+            });
+            let Some(profile) = profile else {
                 let response = AuthStatusResponse {
                     authenticated: false,
                     source: "none".to_owned(),
@@ -126,12 +140,18 @@ fn execute_auth(
                 };
                 return Ok(writer.render_success(&response, response.render_table()));
             };
-            let status = credential::status(&loaded.path, &profile, context.credential.as_ref());
+            let profile_config = loaded
+                .config
+                .profiles
+                .get(&profile)
+                .ok_or_else(|| CliError::profile_not_found(&profile, writer_output))?;
+            let status =
+                credential::status(&loaded.path, &profile, profile_config.credential.as_ref());
             let response = AuthStatusResponse {
                 authenticated: status.authenticated,
                 source: status.source.as_str().to_owned(),
                 profile: Some(profile),
-                auth_mode: Some(context.auth_mode.to_string()),
+                auth_mode: Some(profile_config.resolved_auth_mode().to_string()),
                 backend: status.backend,
                 key: status.key,
             };
@@ -559,6 +579,12 @@ fn register_app_namespace(
         if public_namespace && matches!(existing.is_public, Some(false)) {
             return Err(CliError::invalid_input(
                 "existing app namespace is private; remove --public or create a public app namespace before reusing it",
+                openapi.context.output,
+            ));
+        }
+        if !public_namespace && matches!(existing.is_public, Some(true)) {
+            return Err(CliError::invalid_input(
+                "existing app namespace is public; add --public to reuse it or choose a private app namespace name",
                 openapi.context.output,
             ));
         }

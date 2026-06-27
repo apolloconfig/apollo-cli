@@ -1160,6 +1160,51 @@ fn namespace_create_rejects_public_flag_for_existing_private_appnamespace() {
 }
 
 #[test]
+fn namespace_create_rejects_private_create_for_existing_public_appnamespace() {
+    let server = TestServer::sequence(vec![(
+        200,
+        "application/json",
+        r#"{"name":"application","isPublic":true}"#,
+    )]);
+    let home = temp_home();
+    write_config(
+        &home,
+        &profile_config_with_operator(&server.url(), "apollo-bot"),
+    );
+
+    let assert = base_command(&home)
+        .env("APOLLO_TOKEN", "consumer-token")
+        .args([
+            "--yes",
+            "--output",
+            "json",
+            "namespace",
+            "create",
+            "--env",
+            "DEV",
+            "--app",
+            "demo",
+            "application",
+        ])
+        .assert()
+        .failure();
+
+    assert!(assert.get_output().stdout.is_empty());
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf8 stderr");
+    let json: Value = serde_json::from_str(&stderr).expect("json stderr");
+    assert_eq!(json["error"]["code"], "invalid_input");
+    assert!(stderr.contains("public"));
+    assert!(stderr.contains("--public"));
+
+    let request = server.request();
+    assert_eq!(request.method, "GET");
+    assert_eq!(
+        request.path,
+        "/openapi/v1/apps/demo/appnamespaces/application"
+    );
+}
+
+#[test]
 fn namespace_create_with_public_flag_sends_public_namespace_payload() {
     let server = TestServer::sequence(vec![
         (404, "application/json", r#"{"message":"not found"}"#),
