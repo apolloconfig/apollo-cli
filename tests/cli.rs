@@ -177,6 +177,84 @@ fn namespace_get_requires_namespace_argument() {
 }
 
 #[test]
+fn scoped_command_usage_highlights_defaulted_cluster_and_namespace() {
+    let cases: Vec<(Vec<&str>, &str)> = vec![
+        (
+            vec!["namespace", "list", "--help"],
+            "Usage: apollo namespace list [OPTIONS] --env <ENV> --app <APP> [--cluster <CLUSTER>]",
+        ),
+        (
+            vec!["namespace", "get", "--help"],
+            "Usage: apollo namespace get [OPTIONS] --env <ENV> --app <APP> [--cluster <CLUSTER>] <NAMESPACE>",
+        ),
+        (
+            vec!["namespace", "create", "--help"],
+            "Usage: apollo namespace create [OPTIONS] --env <ENV> --app <APP> [--cluster <CLUSTER>] <NAME>",
+        ),
+        (
+            vec!["config", "list", "--help"],
+            "Usage: apollo config list [OPTIONS] --env <ENV> --app <APP> [--cluster <CLUSTER>] [--namespace <NAMESPACE>]",
+        ),
+        (
+            vec!["config", "get", "--help"],
+            "Usage: apollo config get [OPTIONS] --env <ENV> --app <APP> [--cluster <CLUSTER>] [--namespace <NAMESPACE>] <KEY>",
+        ),
+        (
+            vec!["config", "set", "--help"],
+            "Usage: apollo config set [OPTIONS] --env <ENV> --app <APP> [--cluster <CLUSTER>] [--namespace <NAMESPACE>] <KEY> <VALUE>",
+        ),
+        (
+            vec!["config", "delete", "--help"],
+            "Usage: apollo config delete [OPTIONS] --env <ENV> --app <APP> [--cluster <CLUSTER>] [--namespace <NAMESPACE>] <KEY>",
+        ),
+        (
+            vec!["config", "diff", "--help"],
+            "Usage: apollo config diff [OPTIONS] --env <ENV> --app <APP> [--cluster <CLUSTER>] [--namespace <NAMESPACE>] --target-env <TARGET_ENV> [--target-cluster <TARGET_CLUSTER>] [--target-namespace <TARGET_NAMESPACE>]",
+        ),
+        (
+            vec!["config", "apply", "--help"],
+            "Usage: apollo config apply [OPTIONS] --env <ENV> --app <APP> [--cluster <CLUSTER>] [--namespace <NAMESPACE>] --target-env <TARGET_ENV> [--target-cluster <TARGET_CLUSTER>] [--target-namespace <TARGET_NAMESPACE>]",
+        ),
+        (
+            vec!["release", "list", "--help"],
+            "Usage: apollo release list [OPTIONS] --env <ENV> --app <APP> [--cluster <CLUSTER>] [--namespace <NAMESPACE>]",
+        ),
+        (
+            vec!["release", "create", "--help"],
+            "Usage: apollo release create [OPTIONS] --env <ENV> --app <APP> [--cluster <CLUSTER>] [--namespace <NAMESPACE>] --title <TITLE>",
+        ),
+    ];
+
+    for (args, expected_usage) in cases {
+        let assert = Command::cargo_bin("apollo")
+            .expect("apollo binary")
+            .args(args)
+            .assert()
+            .success();
+        let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+        assert!(
+            stdout.contains(expected_usage),
+            "expected help output to contain `{expected_usage}`:\n{stdout}"
+        );
+    }
+}
+
+#[test]
+fn config_and_release_group_help_mentions_namespace_scope_options() {
+    for args in [vec!["config", "--help"], vec!["release", "--help"]] {
+        Command::cargo_bin("apollo")
+            .expect("apollo binary")
+            .args(args)
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("--cluster"))
+            .stdout(predicate::str::contains("--namespace"))
+            .stdout(predicate::str::contains("default: default"))
+            .stdout(predicate::str::contains("default: application"));
+    }
+}
+
+#[test]
 fn setup_commands_accept_auth_mode_flag() {
     Command::cargo_bin("apollo")
         .expect("apollo binary")

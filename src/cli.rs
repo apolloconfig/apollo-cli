@@ -111,11 +111,17 @@ pub enum Commands {
         command: NamespaceCommand,
     },
     /// Read, change, diff, and sync namespace items.
+    #[command(
+        after_help = "Scope options on config subcommands: --env <ENV>, --app <APP>, --cluster <CLUSTER> (default: default), --namespace <NAMESPACE> (default: application)."
+    )]
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
     },
     /// Create, list, and roll back releases.
+    #[command(
+        after_help = "Scope options on release list/create: --env <ENV>, --app <APP>, --cluster <CLUSTER> (default: default), --namespace <NAMESPACE> (default: application)."
+    )]
     Release {
         #[command(subcommand)]
         command: ReleaseCommand,
@@ -220,11 +226,17 @@ pub enum EnvCommand {
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
 pub enum NamespaceCommand {
     /// List namespaces in an app environment and cluster.
+    #[command(
+        override_usage = "apollo namespace list [OPTIONS] --env <ENV> --app <APP> [--cluster <CLUSTER>]"
+    )]
     List {
         #[command(flatten)]
         scope: ClusterScopeArgs,
     },
     /// Get one namespace and its metadata.
+    #[command(
+        override_usage = "apollo namespace get [OPTIONS] --env <ENV> --app <APP> [--cluster <CLUSTER>] <NAMESPACE>"
+    )]
     Get {
         #[command(flatten)]
         scope: ClusterScopeArgs,
@@ -232,6 +244,9 @@ pub enum NamespaceCommand {
         namespace: String,
     },
     /// Create a namespace in an app environment and cluster.
+    #[command(
+        override_usage = "apollo namespace create [OPTIONS] --env <ENV> --app <APP> [--cluster <CLUSTER>] <NAME>"
+    )]
     Create {
         #[command(flatten)]
         scope: ClusterScopeArgs,
@@ -247,6 +262,9 @@ pub enum NamespaceCommand {
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
 pub enum ConfigCommand {
     /// List namespace configuration items.
+    #[command(
+        override_usage = "apollo config list [OPTIONS] --env <ENV> --app <APP> [--cluster <CLUSTER>] [--namespace <NAMESPACE>]"
+    )]
     List {
         #[command(flatten)]
         scope: NamespaceScopeArgs,
@@ -256,6 +274,9 @@ pub enum ConfigCommand {
         size: Option<u32>,
     },
     /// Get one namespace configuration item.
+    #[command(
+        override_usage = "apollo config get [OPTIONS] --env <ENV> --app <APP> [--cluster <CLUSTER>] [--namespace <NAMESPACE>] <KEY>"
+    )]
     Get {
         #[command(flatten)]
         scope: NamespaceScopeArgs,
@@ -263,6 +284,9 @@ pub enum ConfigCommand {
         key: String,
     },
     /// Create or update a namespace configuration item.
+    #[command(
+        override_usage = "apollo config set [OPTIONS] --env <ENV> --app <APP> [--cluster <CLUSTER>] [--namespace <NAMESPACE>] <KEY> <VALUE>"
+    )]
     Set {
         #[command(flatten)]
         scope: NamespaceScopeArgs,
@@ -276,6 +300,9 @@ pub enum ConfigCommand {
         operator: Option<String>,
     },
     /// Delete one namespace configuration item.
+    #[command(
+        override_usage = "apollo config delete [OPTIONS] --env <ENV> --app <APP> [--cluster <CLUSTER>] [--namespace <NAMESPACE>] <KEY>"
+    )]
     Delete {
         #[command(flatten)]
         scope: NamespaceScopeArgs,
@@ -285,6 +312,9 @@ pub enum ConfigCommand {
         operator: Option<String>,
     },
     /// Compare a namespace against another target.
+    #[command(
+        override_usage = "apollo config diff [OPTIONS] --env <ENV> --app <APP> [--cluster <CLUSTER>] [--namespace <NAMESPACE>] --target-env <TARGET_ENV> [--target-cluster <TARGET_CLUSTER>] [--target-namespace <TARGET_NAMESPACE>]"
+    )]
     Diff {
         #[command(flatten)]
         scope: NamespaceScopeArgs,
@@ -296,6 +326,9 @@ pub enum ConfigCommand {
         target_namespace: Option<String>,
     },
     /// Sync namespace configuration items to another target.
+    #[command(
+        override_usage = "apollo config apply [OPTIONS] --env <ENV> --app <APP> [--cluster <CLUSTER>] [--namespace <NAMESPACE>] --target-env <TARGET_ENV> [--target-cluster <TARGET_CLUSTER>] [--target-namespace <TARGET_NAMESPACE>]"
+    )]
     Apply {
         #[command(flatten)]
         scope: NamespaceScopeArgs,
@@ -313,6 +346,9 @@ pub enum ConfigCommand {
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
 pub enum ReleaseCommand {
     /// List releases for a namespace.
+    #[command(
+        override_usage = "apollo release list [OPTIONS] --env <ENV> --app <APP> [--cluster <CLUSTER>] [--namespace <NAMESPACE>]"
+    )]
     List {
         #[command(flatten)]
         scope: NamespaceScopeArgs,
@@ -322,6 +358,9 @@ pub enum ReleaseCommand {
         size: Option<u32>,
     },
     /// Create a release for a namespace.
+    #[command(
+        override_usage = "apollo release create [OPTIONS] --env <ENV> --app <APP> [--cluster <CLUSTER>] [--namespace <NAMESPACE>] --title <TITLE>"
+    )]
     Create {
         #[command(flatten)]
         scope: NamespaceScopeArgs,
