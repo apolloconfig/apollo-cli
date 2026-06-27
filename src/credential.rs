@@ -265,11 +265,19 @@ pub fn store_native(key: &str, token: &Sensitive) -> Result<CredentialRef, Strin
 pub fn delete(config_path: &Path, credential: &CredentialRef) -> Result<(), String> {
     match credential.backend.as_str() {
         "file" => FileCredentialStore::new(config_path).delete(&credential.key),
+        "native" if native_disabled_for_tests() => Ok(()),
         "native" => NativeCredentialStore.delete(&credential.key),
         "env" => {
             Err("APOLLO_TOKEN is provided by the environment and cannot be removed".to_owned())
         }
         _ => Ok(()),
+    }
+}
+
+pub fn implicit_native_ref(profile: &str) -> CredentialRef {
+    CredentialRef {
+        backend: "native".to_owned(),
+        key: profile.to_owned(),
     }
 }
 
@@ -430,10 +438,9 @@ fn source_from_backend(backend: &str) -> CredentialSource {
 }
 
 fn credential_for_profile(profile: &str, credential: Option<&CredentialRef>) -> CredentialRef {
-    credential.cloned().unwrap_or_else(|| CredentialRef {
-        backend: "native".to_owned(),
-        key: profile.to_owned(),
-    })
+    credential
+        .cloned()
+        .unwrap_or_else(|| implicit_native_ref(profile))
 }
 
 fn token_from_store(

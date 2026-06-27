@@ -748,6 +748,51 @@ key = "dev"
 }
 
 #[test]
+fn profile_add_overwrite_deletes_replaced_file_credential() {
+    let home = temp_home();
+    write_config(
+        &home,
+        r#"
+active_profile = "dev"
+
+[profiles.dev]
+server = "https://apollo-old.example.com"
+
+[profiles.dev.credential]
+backend = "file"
+key = "old-dev"
+"#,
+    );
+    fs::create_dir_all(
+        credential_file_path(&home, "old-dev")
+            .parent()
+            .expect("parent"),
+    )
+    .expect("credential dir");
+    fs::write(credential_file_path(&home, "old-dev"), "old-secret\n").expect("old credential");
+
+    base_command(&home)
+        .write_stdin("apollo_pat_new_token\n")
+        .args([
+            "--server",
+            "https://apollo-new.example.com",
+            "--output",
+            "json",
+            "profile",
+            "add",
+            "dev",
+            "--overwrite",
+            "--token-stdin",
+            "--store-token-in-file",
+        ])
+        .assert()
+        .success();
+
+    assert!(!credential_file_path(&home, "old-dev").exists());
+    assert!(credential_file_path(&home, "dev").exists());
+}
+
+#[test]
 fn profile_add_overwrite_preserves_existing_output_without_global_output() {
     let home = temp_home();
     write_config(

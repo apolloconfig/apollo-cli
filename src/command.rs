@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::io::{self, BufRead, IsTerminal, Write};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -183,12 +184,6 @@ fn execute_auth(
                 AuthMode::UserToken,
                 writer_output,
             )?;
-            let previous_credential = loaded
-                .config
-                .profiles
-                .get(&profile)
-                .and_then(|profile| profile.credential.clone());
-
             let credential_ref = store_setup_token(
                 &loaded.path,
                 &profile,
@@ -197,13 +192,15 @@ fn execute_auth(
                 is_interactive_terminal(),
                 writer_output,
             )?;
-            if let Some(previous_credential) = previous_credential
-                && previous_credential != credential_ref
-            {
-                credential::delete(&loaded.path, &previous_credential).map_err(|error| {
-                    CliError::credential_store_unavailable(&error, writer_output)
-                })?;
-            }
+            delete_replaced_credential(
+                &loaded.path,
+                replaced_credential_to_delete(
+                    &profile,
+                    loaded.config.profiles.get(&profile),
+                    &credential_ref,
+                ),
+                writer_output,
+            )?;
 
             let mut config = loaded.config.clone();
             let profile_config = config
@@ -434,6 +431,11 @@ fn execute_profile_setup(
         })
         .transpose()?;
     if let Some(credential) = credential.clone() {
+        delete_replaced_credential(
+            &loaded.path,
+            replaced_credential_to_delete(&profile_name, existing_profile, &credential),
+            writer_output,
+        )?;
         profile_config.credential = Some(credential);
     }
 
@@ -477,21 +479,38 @@ fn execute_app(
     output: OutputFormat,
 ) -> Result<RenderedOutput, CliError> {
     let openapi = openapi_context(cli, output)?;
-    let path = match command {
+    match command {
         AppCommand::List { app_ids } => {
             if let Some(app_ids) = app_ids {
-                append_query("/openapi/v1/apps".to_owned(), "appIds", &app_ids)
-            } else if openapi.context.auth_mode.is_user_token() {
-                "/openapi/v1/apps".to_owned()
+                if openapi.context.auth_mode.is_user_token() {
+                    let path = append_query("/openapi/v1/apps".to_owned(), "appIds", &app_ids);
+                    openapi.request("GET", &path, None)
+                } else {
+                    let response =
+                        openapi
+                            .client
+                            .request("GET", "/openapi/v1/apps/authorized", None)?;
+                    let data = filter_apps_by_ids(response.data.clone(), &app_ids);
+                    Ok(render_openapi_response_with_data(
+                        &openapi.writer,
+                        &response,
+                        data,
+                    ))
+                }
             } else {
-                "/openapi/v1/apps/authorized".to_owned()
+                let path = if openapi.context.auth_mode.is_user_token() {
+                    "/openapi/v1/apps"
+                } else {
+                    "/openapi/v1/apps/authorized"
+                };
+                openapi.request("GET", path, None)
             }
         }
         AppCommand::Get { app_id } => {
-            format!("/openapi/v1/apps/{}", encode_path_segment(&app_id))
+            let path = format!("/openapi/v1/apps/{}", encode_path_segment(&app_id));
+            openapi.request("GET", &path, None)
         }
-    };
-    openapi.request("GET", &path, None)
+    }
 }
 
 fn execute_env(
@@ -520,7 +539,13 @@ fn execute_namespace(
     match command {
         NamespaceCommand::List { scope } => {
             let path = cluster_namespaces_path(&scope.env, &scope.app, &scope.cluster);
-            openapi.request("GET", &path, None)
+            let response = openapi.client.request("GET", &path, None)?;
+            let data = redact_nested_item_values(response.data.clone());
+            Ok(render_openapi_response_with_data(
+                &openapi.writer,
+                &response,
+                data,
+            ))
         }
         NamespaceCommand::Get { scope, namespace } => {
             let path = namespace_path(&NamespaceScopeArgs {
@@ -605,6 +630,12 @@ fn ensure_namespace_absent(
             openapi.context.output,
         )),
         Err(error) if is_missing_namespace(&error) => Ok(()),
+        Err(error)
+            if openapi.context.auth_mode.is_user_token()
+                && matches!(error.http_status_code(), Some(403)) =>
+        {
+            Ok(())
+        }
         Err(error) => Err(error),
     }
 }
@@ -770,7 +801,10 @@ fn stored_public_app_namespace_matches(
     } else {
         format!("{}.{}", registration.name, registration.format)
     };
-    stored_name == requested_name || stored_name.ends_with(&format!(".{requested_name}"))
+    stored_name == requested_name
+        || stored_name
+            .split_once('.')
+            .is_some_and(|(_, suffix)| suffix == requested_name)
 }
 
 fn is_missing_app_namespace(error: &CliError) -> bool {
@@ -829,10 +863,16 @@ fn execute_config(
             let mut path = format!("{}/items", namespace_path(&scope));
             path = append_query(path, "page", &page.unwrap_or(DEFAULT_PAGE).to_string());
             path = append_query(path, "size", &size.unwrap_or(DEFAULT_PAGE_SIZE).to_string());
-            openapi.request("GET", &path, None)
+            let response = openapi.client.request("GET", &path, None)?;
+            let data = redact_config_item_values(response.data.clone());
+            Ok(render_openapi_response_with_data(
+                &openapi.writer,
+                &response,
+                data,
+            ))
         }
         ConfigCommand::Get { scope, key } => {
-            let path = item_path(&scope, &key);
+            let path = item_read_path(&scope, &key);
             openapi.request("GET", &path, None)
         }
         ConfigCommand::Set {
@@ -848,7 +888,8 @@ fn execute_config(
                 &openapi.context,
                 openapi.context.output,
             )?;
-            let update_path = append_query(item_path(&scope, &key), "createIfNotExists", "true");
+            let update_path =
+                append_query(item_write_path(&scope, &key), "createIfNotExists", "true");
             let create_path = append_optional_query(
                 format!("{}/items", namespace_path(&scope)),
                 "operator",
@@ -888,8 +929,11 @@ fn execute_config(
                 &openapi.context,
                 openapi.context.output,
             )?;
-            let path =
-                append_optional_query(item_path(&scope, &key), "operator", operator.as_deref());
+            let path = append_optional_query(
+                item_write_path(&scope, &key),
+                "operator",
+                operator.as_deref(),
+            );
             openapi.request("DELETE", &path, None)
         }
         ConfigCommand::Diff {
@@ -961,7 +1005,13 @@ fn execute_release(
             let mut path = format!("{}/releases/active", namespace_path(&scope));
             path = append_query(path, "page", &page.unwrap_or(DEFAULT_PAGE).to_string());
             path = append_query(path, "size", &size.unwrap_or(DEFAULT_PAGE_SIZE).to_string());
-            openapi.request("GET", &path, None)
+            let response = openapi.client.request("GET", &path, None)?;
+            let data = redact_release_configurations(response.data.clone());
+            Ok(render_openapi_response_with_data(
+                &openapi.writer,
+                &response,
+                data,
+            ))
         }
         ReleaseCommand::Create {
             scope,
@@ -1302,6 +1352,145 @@ fn render_openapi_response(writer: &OutputWriter, response: &OpenApiResponse) ->
     writer.render_success(response, response.render_table())
 }
 
+fn render_openapi_response_with_data(
+    writer: &OutputWriter,
+    response: &OpenApiResponse,
+    data: Value,
+) -> RenderedOutput {
+    let response = response.with_data(data);
+    render_openapi_response(writer, &response)
+}
+
+fn filter_apps_by_ids(data: Value, app_ids: &str) -> Value {
+    let selected = app_ids
+        .split(',')
+        .map(str::trim)
+        .filter(|app_id| !app_id.is_empty())
+        .collect::<HashSet<_>>();
+    if selected.is_empty() {
+        return data;
+    }
+
+    filter_value_array(data, |app| {
+        app.get("appId")
+            .and_then(Value::as_str)
+            .is_some_and(|app_id| selected.contains(app_id))
+    })
+}
+
+fn redact_config_item_values(mut data: Value) -> Value {
+    redact_item_values_in_list(&mut data);
+    data
+}
+
+fn redact_nested_item_values(mut data: Value) -> Value {
+    redact_nested_item_values_in_value(&mut data);
+    data
+}
+
+fn redact_release_configurations(mut data: Value) -> Value {
+    redact_release_configurations_in_value(&mut data);
+    data
+}
+
+fn filter_value_array<F>(mut data: Value, predicate: F) -> Value
+where
+    F: Fn(&Value) -> bool,
+{
+    match &mut data {
+        Value::Array(items) => items.retain(predicate),
+        Value::Object(map) => {
+            if let Some(Value::Array(items)) = map.get_mut("content") {
+                items.retain(predicate);
+            }
+        }
+        _ => {}
+    }
+    data
+}
+
+fn redact_item_values_in_list(data: &mut Value) {
+    match data {
+        Value::Array(items) => redact_item_values(items),
+        Value::Object(map) => {
+            if let Some(Value::Array(items)) = map.get_mut("content") {
+                redact_item_values(items);
+            } else {
+                redact_item_value_fields(data);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn redact_nested_item_values_in_value(value: &mut Value) {
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                redact_nested_item_values_in_value(item);
+            }
+        }
+        Value::Object(map) => {
+            if let Some(Value::Array(items)) = map.get_mut("items") {
+                redact_item_values(items);
+            }
+            for value in map.values_mut() {
+                redact_nested_item_values_in_value(value);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn redact_item_values(items: &mut [Value]) {
+    for item in items {
+        redact_item_value_fields(item);
+    }
+}
+
+fn redact_item_value_fields(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            for key in ["value", "oldValue", "newValue"] {
+                if map.contains_key(key) {
+                    map.insert(key.to_owned(), Value::String("[REDACTED]".to_owned()));
+                }
+            }
+            for value in map.values_mut() {
+                redact_item_value_fields(value);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                redact_item_value_fields(value);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn redact_release_configurations_in_value(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            if map.contains_key("configurations") {
+                map.insert(
+                    "configurations".to_owned(),
+                    Value::String("[REDACTED]".to_owned()),
+                );
+            }
+            for value in map.values_mut() {
+                redact_release_configurations_in_value(value);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                redact_release_configurations_in_value(value);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn config_command_requires_confirmation(command: &ConfigCommand) -> bool {
     matches!(
         command,
@@ -1447,7 +1636,7 @@ fn namespace_path(scope: &NamespaceScopeArgs) -> String {
     )
 }
 
-fn item_path(scope: &NamespaceScopeArgs, key: &str) -> String {
+fn item_read_path(scope: &NamespaceScopeArgs, key: &str) -> String {
     if key.contains('/') || key.contains('\\') {
         format!(
             "{}/encodedItems/{}",
@@ -1461,6 +1650,14 @@ fn item_path(scope: &NamespaceScopeArgs, key: &str) -> String {
             encode_path_segment(key)
         )
     }
+}
+
+fn item_write_path(scope: &NamespaceScopeArgs, key: &str) -> String {
+    format!(
+        "{}/items/{}",
+        namespace_path(scope),
+        encode_path_segment(key)
+    )
 }
 
 fn source_sync_items(
@@ -1655,6 +1852,31 @@ fn preserved_setup_credential(
         return existing_profile.credential.clone();
     }
     existing_profile.credential.clone()
+}
+
+fn replaced_credential_to_delete(
+    profile_name: &str,
+    existing_profile: Option<&ProfileConfig>,
+    replacement: &CredentialRef,
+) -> Option<CredentialRef> {
+    let existing_profile = existing_profile?;
+    let previous = existing_profile
+        .credential
+        .clone()
+        .unwrap_or_else(|| credential::implicit_native_ref(profile_name));
+    (previous != *replacement).then_some(previous)
+}
+
+fn delete_replaced_credential(
+    config_path: &std::path::Path,
+    credential_ref: Option<CredentialRef>,
+    output: OutputFormat,
+) -> Result<(), CliError> {
+    if let Some(credential_ref) = credential_ref {
+        credential::delete(config_path, &credential_ref)
+            .map_err(|error| CliError::credential_store_unavailable(&error, output))?;
+    }
+    Ok(())
 }
 
 fn resolve_auth_mode(
@@ -2095,6 +2317,7 @@ mod tests {
     use std::io::Cursor;
 
     use crate::cli::OutputFormat;
+    use crate::config::{CredentialRef, ProfileConfig};
 
     #[test]
     fn read_prompt_line_reports_eof_as_aborted_input() {
@@ -2103,6 +2326,26 @@ mod tests {
             super::read_prompt_line(&mut reader, OutputFormat::Json).expect_err("EOF should fail");
 
         assert_eq!(error.exit_code(), 1);
+    }
+
+    #[test]
+    fn replaced_credential_to_delete_uses_implicit_native_for_legacy_profiles() {
+        let existing = ProfileConfig {
+            server: Some("https://apollo.example.com".to_owned()),
+            ..ProfileConfig::default()
+        };
+        let replacement = CredentialRef {
+            backend: "file".to_owned(),
+            key: "dev".to_owned(),
+        };
+
+        assert_eq!(
+            super::replaced_credential_to_delete("dev", Some(&existing), &replacement),
+            Some(CredentialRef {
+                backend: "native".to_owned(),
+                key: "dev".to_owned(),
+            })
+        );
     }
 }
 

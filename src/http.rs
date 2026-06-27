@@ -22,6 +22,14 @@ impl OpenApiResponse {
         serde_json::to_string_pretty(&self.redacted_data()).expect("openapi response table json")
     }
 
+    pub fn with_data(&self, data: Value) -> Self {
+        Self {
+            status: self.status,
+            data,
+            redaction_token: self.redaction_token.clone(),
+        }
+    }
+
     fn redacted_data(&self) -> Value {
         redact_exact_token_value(self.data.clone(), self.redaction_token.expose_secret())
     }
