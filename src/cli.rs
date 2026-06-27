@@ -1,4 +1,4 @@
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 
 #[derive(Parser, Debug)]
@@ -256,6 +256,15 @@ pub enum NamespaceCommand {
         operator: Option<String>,
         #[arg(long = "public", help = "Create a public namespace")]
         public_namespace: bool,
+        #[arg(long, help = "AppNamespace comment")]
+        comment: Option<String>,
+        #[arg(
+            long = "no-append-namespace-prefix",
+            action = ArgAction::SetFalse,
+            default_value_t = true,
+            help = "Set appendNamespacePrefix=false when registering the AppNamespace"
+        )]
+        append_namespace_prefix: bool,
     },
 }
 
@@ -294,6 +303,14 @@ pub enum ConfigCommand {
         key: String,
         #[arg(help = "Configuration item value")]
         value: String,
+        #[arg(
+            long = "type",
+            value_name = "TYPE",
+            default_value_t = 0,
+            value_parser = parse_item_type,
+            help = "Apollo item type: 0=string, 1=number, 2=boolean, 3=json"
+        )]
+        item_type: u8,
         #[arg(long, help = "Change comment")]
         comment: Option<String>,
         #[arg(long, help = "Operator for consumer-token mode")]
@@ -421,6 +438,17 @@ pub enum HttpMethod {
     Put,
     Patch,
     Delete,
+}
+
+fn parse_item_type(value: &str) -> Result<u8, String> {
+    let item_type: u8 = value
+        .parse()
+        .map_err(|_| "item type must be an integer in [0, 3]".to_owned())?;
+    if item_type <= 3 {
+        Ok(item_type)
+    } else {
+        Err("item type must be an integer in [0, 3]".to_owned())
+    }
 }
 
 impl HttpMethod {

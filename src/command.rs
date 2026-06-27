@@ -534,6 +534,8 @@ fn execute_namespace(
             name,
             operator,
             public_namespace,
+            comment,
+            append_namespace_prefix,
         } => {
             let operator = operator_for_mutation(
                 operator.as_deref(),
@@ -545,6 +547,8 @@ fn execute_namespace(
                 &scope.app,
                 &name,
                 public_namespace,
+                comment.as_deref(),
+                append_namespace_prefix,
                 operator.as_deref(),
             )?;
             let namespace_scope = NamespaceScopeArgs {
@@ -620,6 +624,8 @@ fn register_app_namespace(
     app_id: &str,
     namespace_name: &str,
     public_namespace: bool,
+    comment: Option<&str>,
+    append_namespace_prefix: bool,
     operator: Option<&str>,
 ) -> Result<RegisteredAppNamespace, CliError> {
     let registration = app_namespace_registration(namespace_name);
@@ -659,7 +665,11 @@ fn register_app_namespace(
         "name": registration.name,
         "format": registration.format,
         "isPublic": public_namespace,
+        "appendNamespacePrefix": append_namespace_prefix,
     });
+    if let Some(comment) = comment {
+        body["comment"] = json!(comment);
+    }
     if let Some(operator) = operator {
         body["dataChangeCreatedBy"] = json!(operator);
     }
@@ -829,6 +839,7 @@ fn execute_config(
             scope,
             key,
             value,
+            item_type,
             comment,
             operator,
         } => {
@@ -846,6 +857,7 @@ fn execute_config(
             let mut body = json!({
                 "key": key,
                 "value": value,
+                "type": item_type,
             });
             if let Some(operator) = &operator {
                 body["dataChangeCreatedBy"] = json!(operator);

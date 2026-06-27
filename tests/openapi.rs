@@ -456,6 +456,7 @@ fn user_token_config_set_does_not_require_or_send_operator() {
     let body: Value = serde_json::from_str(&request.body).expect("json body");
     assert_eq!(body["key"], "timeout");
     assert_eq!(body["value"], "3000");
+    assert_eq!(body["type"], 0);
     assert!(body.get("dataChangeCreatedBy").is_none());
     assert!(body.get("dataChangeLastModifiedBy").is_none());
 }
@@ -658,9 +659,46 @@ fn config_set_with_yes_sends_update_payload() {
     let body: Value = serde_json::from_str(&request.body).expect("json body");
     assert_eq!(body["key"], "timeout");
     assert_eq!(body["value"], "3000");
+    assert_eq!(body["type"], 0);
     assert_eq!(body["dataChangeLastModifiedBy"], "apollo-bot");
     assert_eq!(body["dataChangeCreatedBy"], "apollo-bot");
     assert!(body.get("comment").is_none());
+}
+
+#[test]
+fn config_set_with_yes_sends_item_type_when_provided() {
+    let server = TestServer::empty();
+    let home = temp_home();
+    write_config(
+        &home,
+        &profile_config_with_operator(&server.url(), "apollo-bot"),
+    );
+
+    base_command(&home)
+        .env("APOLLO_TOKEN", "consumer-token")
+        .args([
+            "--yes",
+            "--output",
+            "json",
+            "config",
+            "set",
+            "--env",
+            "DEV",
+            "--app",
+            "demo",
+            "--type",
+            "3",
+            "payload",
+            r#"{"enabled":true}"#,
+        ])
+        .assert()
+        .success();
+
+    let request = server.request();
+    let body: Value = serde_json::from_str(&request.body).expect("json body");
+    assert_eq!(body["key"], "payload");
+    assert_eq!(body["value"], r#"{"enabled":true}"#);
+    assert_eq!(body["type"], 3);
 }
 
 #[test]
@@ -794,6 +832,7 @@ fn config_set_falls_back_to_create_when_update_reports_missing_item() {
     let body: Value = serde_json::from_str(&requests[1].body).expect("json body");
     assert_eq!(body["key"], "timeout");
     assert_eq!(body["value"], "3000");
+    assert_eq!(body["type"], 0);
     assert_eq!(body["dataChangeCreatedBy"], "apollo-bot");
 }
 
@@ -841,6 +880,7 @@ fn namespace_create_with_yes_sends_namespace_instance_payload() {
     assert_eq!(app_namespace_body["name"], "settings");
     assert_eq!(app_namespace_body["format"], "json");
     assert_eq!(app_namespace_body["isPublic"], false);
+    assert_eq!(app_namespace_body["appendNamespacePrefix"], true);
     assert_eq!(app_namespace_body["dataChangeCreatedBy"], "apollo-bot");
 
     assert_eq!(requests[2].method, "POST");
@@ -1387,6 +1427,9 @@ fn namespace_create_with_public_flag_sends_public_namespace_payload() {
             "--app",
             "demo",
             "--public",
+            "--comment",
+            "shared settings",
+            "--no-append-namespace-prefix",
             "application.yml",
         ])
         .assert()
@@ -1409,6 +1452,8 @@ fn namespace_create_with_public_flag_sends_public_namespace_payload() {
     assert_eq!(app_namespace_body["name"], "application");
     assert_eq!(app_namespace_body["format"], "yml");
     assert_eq!(app_namespace_body["isPublic"], true);
+    assert_eq!(app_namespace_body["appendNamespacePrefix"], false);
+    assert_eq!(app_namespace_body["comment"], "shared settings");
     assert_eq!(app_namespace_body["dataChangeCreatedBy"], "apollo-bot");
 
     assert_eq!(requests[3].method, "POST");

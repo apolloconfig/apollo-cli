@@ -45,10 +45,10 @@ apollo app get sample-app
 apollo env list --app sample-app
 apollo namespace list --env DEV --app sample-app
 apollo namespace get --env DEV --app sample-app application
-apollo namespace create --env DEV --app sample-app application --yes
+apollo namespace create --env DEV --app sample-app application --comment "app settings" --yes
 apollo config list --env DEV --app sample-app
 apollo config get --env DEV --app sample-app timeout
-apollo config set --env DEV --app sample-app timeout 3000 --yes
+apollo config set --env DEV --app sample-app timeout 3000 --type 1 --yes
 apollo config delete --env DEV --app sample-app timeout --yes
 apollo config diff --env DEV --app sample-app --target-env FAT
 apollo config apply --env DEV --app sample-app --target-env FAT --yes
@@ -64,7 +64,14 @@ endpoints are intentionally not used.
 `apollo namespace create` registers the AppNamespace first and then creates the namespace in the
 requested environment and cluster. It creates a private AppNamespace by default. Pass `--public` only
 when the namespace should be public. File namespace formats are inferred from `.json`, `.yml`,
-`.yaml`, and `.xml` suffixes; other names default to `properties`.
+`.yaml`, and `.xml` suffixes; other names default to `properties`. `--comment` is stored on the
+AppNamespace. Public AppNamespace registration sends Apollo's `appendNamespacePrefix=true` default;
+pass `--no-append-namespace-prefix` when the namespace name must be stored without Apollo's public
+namespace prefix behavior.
+
+`apollo config set` sends Apollo's `OpenItemDTO.type` field. The default is `0` for a string item.
+Apollo Portal also uses `1` for number, `2` for boolean, and `3` for JSON; these values are validated
+client-side before the OpenAPI request is sent.
 
 ## Global flags
 

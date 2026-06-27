@@ -255,6 +255,52 @@ fn config_and_release_group_help_mentions_namespace_scope_options() {
 }
 
 #[test]
+fn payload_option_help_lists_namespace_and_config_fields() {
+    Command::cargo_bin("apollo")
+        .expect("apollo binary")
+        .args(["namespace", "create", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--comment <COMMENT>"))
+        .stdout(predicate::str::contains("--no-append-namespace-prefix"));
+
+    Command::cargo_bin("apollo")
+        .expect("apollo binary")
+        .args(["config", "set", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--type <TYPE>"));
+}
+
+#[test]
+fn config_set_rejects_invalid_item_type() {
+    let home = temp_home();
+    base_command(&home)
+        .args([
+            "--server",
+            "http://127.0.0.1:9",
+            "--output",
+            "json",
+            "--yes",
+            "config",
+            "set",
+            "--env",
+            "DEV",
+            "--app",
+            "demo",
+            "--type",
+            "4",
+            "timeout",
+            "3000",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "item type must be an integer in [0, 3]",
+        ));
+}
+
+#[test]
 fn setup_commands_accept_auth_mode_flag() {
     Command::cargo_bin("apollo")
         .expect("apollo binary")
