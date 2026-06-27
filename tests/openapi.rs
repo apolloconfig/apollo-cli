@@ -977,7 +977,7 @@ fn namespace_create_recovers_when_server_reports_failure_after_creation() {
 }
 
 #[test]
-fn namespace_create_recovers_when_user_token_redirects_after_creation() {
+fn namespace_create_does_not_mask_auth_redirect_after_namespace_post() {
     let server = TestServer::sequence_with_headers(vec![
         (
             404,
@@ -1020,74 +1020,15 @@ fn namespace_create_recovers_when_user_token_redirects_after_creation() {
             "settings",
         ])
         .assert()
-        .success()
-        .stdout(predicate::str::contains(r#""namespaceName": "settings""#));
+        .failure()
+        .stderr(predicate::str::contains("HTTP 302"))
+        .stderr(predicate::str::contains("redirected to /signin"));
 
-    let requests = server.requests(4);
+    let requests = server.requests(3);
     assert_eq!(requests[0].method, "GET");
     assert_eq!(requests[1].method, "POST");
     assert_eq!(requests[2].method, "POST");
     assert_eq!(requests[2].path, "/openapi/v1/namespaces");
-    assert_eq!(requests[3].method, "GET");
-    assert_eq!(
-        requests[3].path,
-        "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/settings"
-    );
-}
-
-#[test]
-fn namespace_create_retries_recovery_when_user_token_redirect_is_transient() {
-    let server = TestServer::sequence_with_headers(vec![
-        (
-            404,
-            "application/json",
-            r#"{"message":"not found"}"#,
-            Vec::new(),
-        ),
-        (
-            200,
-            "application/json",
-            r#"{"name":"settings"}"#,
-            Vec::new(),
-        ),
-        (302, "text/plain", "", vec![("Location", "/signin")]),
-        (302, "text/plain", "", vec![("Location", "/signin")]),
-        (
-            200,
-            "application/json",
-            r#"{"namespaceName":"settings","items":[]}"#,
-            Vec::new(),
-        ),
-    ]);
-    let home = temp_home();
-    write_config(
-        &home,
-        &profile_config_with_auth_mode(&server.url(), "user-token"),
-    );
-    write_file_credential(&home, "dev", "apollo_pat_stored_token");
-
-    base_command(&home)
-        .args([
-            "--yes",
-            "--output",
-            "json",
-            "namespace",
-            "create",
-            "--env",
-            "DEV",
-            "--app",
-            "demo",
-            "settings",
-        ])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains(r#""namespaceName": "settings""#));
-
-    let requests = server.requests(5);
-    assert_eq!(requests[2].method, "POST");
-    assert_eq!(requests[2].path, "/openapi/v1/namespaces");
-    assert_eq!(requests[3].method, "GET");
-    assert_eq!(requests[4].method, "GET");
 }
 
 #[test]
