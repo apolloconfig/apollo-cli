@@ -282,6 +282,45 @@ server = "https://apollo-dev.example.com"
 }
 
 #[test]
+fn auth_login_user_token_clears_existing_operator() {
+    let home = temp_home();
+    write_config(
+        &home,
+        r#"
+active_profile = "dev"
+
+[profiles.dev]
+server = "https://apollo-dev.example.com"
+auth_mode = "consumer-token"
+operator = "apollo-bot"
+"#,
+    );
+
+    let assert = base_command(&home)
+        .write_stdin("apollo_pat_test_token\n")
+        .args([
+            "--output",
+            "json",
+            "auth",
+            "login",
+            "--auth-mode",
+            "user-token",
+            "--token-stdin",
+            "--store-token-in-file",
+        ])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let json: Value = serde_json::from_str(&stdout).expect("json stdout");
+    assert_eq!(json["authMode"], "user-token");
+
+    let config = fs::read_to_string(config_path(&home)).expect("config");
+    assert!(config.contains("auth_mode = \"user-token\""));
+    assert!(!config.contains("operator ="));
+}
+
+#[test]
 fn auth_login_rejects_explicit_user_token_mode_with_consumer_token_value() {
     let home = temp_home();
     write_config(

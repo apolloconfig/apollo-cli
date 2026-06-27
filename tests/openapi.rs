@@ -1230,7 +1230,102 @@ fn namespace_create_with_public_flag_sends_public_namespace_payload() {
 }
 
 #[test]
-fn user_token_rejects_namespace_and_release_write_endpoints_without_network_call() {
+fn user_token_namespace_create_omits_operator_fields() {
+    let server = TestServer::sequence(vec![
+        (404, "application/json", r#"{"message":"not found"}"#),
+        (200, "application/json", r#"{"name":"settings"}"#),
+        (200, "application/json", "{}"),
+    ]);
+    let home = temp_home();
+    write_config(
+        &home,
+        &profile_config_with_auth_mode(&server.url(), "user-token"),
+    );
+    write_file_credential(&home, "dev", "apollo_pat_stored_token");
+
+    base_command(&home)
+        .args([
+            "--yes",
+            "--output",
+            "json",
+            "namespace",
+            "create",
+            "--env",
+            "DEV",
+            "--app",
+            "demo",
+            "settings",
+        ])
+        .assert()
+        .success();
+
+    let requests = server.requests(3);
+    for request in &requests {
+        assert!(request.headers.iter().any(|header| {
+            header.eq_ignore_ascii_case("authorization: Bearer apollo_pat_stored_token")
+        }));
+    }
+
+    assert_eq!(
+        requests[0].path,
+        "/openapi/v1/apps/demo/appnamespaces/settings"
+    );
+
+    assert_eq!(requests[1].method, "POST");
+    assert_eq!(requests[1].path, "/openapi/v1/apps/demo/appnamespaces");
+    let app_namespace_body: Value = serde_json::from_str(&requests[1].body).expect("json body");
+    assert!(app_namespace_body.get("dataChangeCreatedBy").is_none());
+
+    assert_eq!(requests[2].method, "POST");
+    assert_eq!(requests[2].path, "/openapi/v1/namespaces");
+}
+
+#[test]
+fn user_token_release_writes_omit_operator_fields() {
+    let server = TestServer::sequence(vec![
+        (200, "application/json", r#"{"id":42}"#),
+        (200, "application/json", "{}"),
+    ]);
+    let home = temp_home();
+    write_config(
+        &home,
+        &profile_config_with_auth_mode(&server.url(), "user-token"),
+    );
+    write_file_credential(&home, "dev", "apollo_pat_stored_token");
+
+    base_command(&home)
+        .args([
+            "--yes", "--output", "json", "release", "create", "--env", "DEV", "--app", "demo",
+            "--title", "release",
+        ])
+        .assert()
+        .success();
+
+    base_command(&home)
+        .args([
+            "--yes", "--output", "json", "release", "rollback", "--env", "DEV", "42",
+        ])
+        .assert()
+        .success();
+
+    let requests = server.requests(2);
+    assert_eq!(requests[0].method, "POST");
+    assert_eq!(
+        requests[0].path,
+        "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/application/releases"
+    );
+    let release_body: Value = serde_json::from_str(&requests[0].body).expect("json body");
+    assert!(release_body.get("releasedBy").is_none());
+
+    assert_eq!(requests[1].method, "PUT");
+    assert_eq!(
+        requests[1].path,
+        "/openapi/v1/envs/DEV/releases/42/rollback"
+    );
+}
+
+#[test]
+fn user_token_namespace_and_release_reject_explicit_operator_without_network_call() {
     let home = temp_home();
     write_config(
         &home,
@@ -1249,14 +1344,36 @@ fn user_token_rejects_namespace_and_release_write_endpoints_without_network_call
             "DEV",
             "--app",
             "demo",
+            "--operator",
+            "apollo-bot",
             "settings",
         ],
         vec![
-            "--yes", "--output", "json", "release", "create", "--env", "DEV", "--app", "demo",
-            "--title", "release",
+            "--yes",
+            "--output",
+            "json",
+            "release",
+            "create",
+            "--env",
+            "DEV",
+            "--app",
+            "demo",
+            "--operator",
+            "apollo-bot",
+            "--title",
+            "release",
         ],
         vec![
-            "--yes", "--output", "json", "release", "rollback", "--env", "DEV", "42",
+            "--yes",
+            "--output",
+            "json",
+            "release",
+            "rollback",
+            "--env",
+            "DEV",
+            "--operator",
+            "apollo-bot",
+            "42",
         ],
     ] {
         let assert = base_command(&home).args(args).assert().failure();
@@ -1265,7 +1382,7 @@ fn user_token_rejects_namespace_and_release_write_endpoints_without_network_call
         let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf8 stderr");
         let json: Value = serde_json::from_str(&stderr).expect("json stderr");
         assert_eq!(json["error"]["code"], "invalid_input");
-        assert!(stderr.contains("consumer-token"));
+        assert!(stderr.contains("operator"));
         assert!(stderr.contains("user-token"));
     }
 }

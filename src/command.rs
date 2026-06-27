@@ -179,6 +179,9 @@ fn execute_auth(
                 .get_mut(&profile)
                 .ok_or_else(|| CliError::profile_not_found(&profile, writer_output))?;
             profile_config.auth_mode = Some(auth_mode);
+            if auth_mode.is_user_token() {
+                profile_config.operator = None;
+            }
             profile_config.credential = Some(credential_ref.clone());
             save_config(&loaded.path, &config, writer_output)?;
 
@@ -495,11 +498,6 @@ fn execute_namespace(
             operator,
             public_namespace,
         } => {
-            require_consumer_token_for_operator_backed_write(
-                &openapi.context,
-                "namespace create",
-                openapi.context.output,
-            )?;
             let operator = operator_for_mutation(
                 operator.as_deref(),
                 &openapi.context,
@@ -868,11 +866,6 @@ fn execute_release(
             emergency,
             operator,
         } => {
-            require_consumer_token_for_operator_backed_write(
-                &openapi.context,
-                "release create",
-                openapi.context.output,
-            )?;
             let operator = operator_for_mutation(
                 operator.as_deref(),
                 &openapi.context,
@@ -895,11 +888,6 @@ fn execute_release(
             to_release_id,
             operator,
         } => {
-            require_consumer_token_for_operator_backed_write(
-                &openapi.context,
-                "release rollback",
-                openapi.context.output,
-            )?;
             let operator = operator_for_mutation(
                 operator.as_deref(),
                 &openapi.context,
@@ -1314,22 +1302,6 @@ fn operator_for_mutation(
     }
 
     required_operator(command_operator, context, output).map(Some)
-}
-
-fn require_consumer_token_for_operator_backed_write(
-    context: &RuntimeContext,
-    command_name: &str,
-    output: OutputFormat,
-) -> Result<(), CliError> {
-    if context.auth_mode.is_user_token() {
-        return Err(CliError::invalid_input(
-            &format!(
-                "{command_name} does not support user-token auth yet because the Apollo server endpoint still requires consumer-token operator resolution; use a consumer-token profile for this command"
-            ),
-            output,
-        ));
-    }
-    Ok(())
 }
 
 fn append_optional_query(path: String, key: &str, value: Option<&str>) -> String {
