@@ -398,6 +398,36 @@ fn consumer_token_app_list_filters_authorized_apps_locally() {
 }
 
 #[test]
+fn user_token_app_list_filters_visible_apps_locally() {
+    let server = TestServer::json(r#"[{"appId":"demo"},{"appId":"other"}]"#);
+    let home = temp_home();
+    write_config(
+        &home,
+        &profile_config_with_auth_mode(&server.url(), "user-token"),
+    );
+
+    let assert = base_command(&home)
+        .env("APOLLO_TOKEN", "apollo_pat_test_token")
+        .args([
+            "--output",
+            "json",
+            "app",
+            "list",
+            "--app-ids",
+            "demo,missing",
+        ])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let json: Value = serde_json::from_str(&stdout).expect("json stdout");
+    assert_eq!(server.request().path, "/openapi/v1/apps");
+    assert_eq!(json["data"].as_array().expect("data array").len(), 1);
+    assert_eq!(json["data"][0]["appId"], "demo");
+    assert!(!stdout.contains("other"));
+}
+
+#[test]
 fn consumer_token_app_get_checks_authorized_apps() {
     let app_get_server = TestServer::sequence(vec![
         (200, "application/json", r#"[{"appId":"demo"}]"#),
@@ -1622,7 +1652,7 @@ fn namespace_create_continues_when_user_token_cannot_read_existing_namespace() {
 fn namespace_create_continues_when_user_token_cannot_read_appnamespace_lookup() {
     let server = TestServer::sequence(vec![
         (403, "application/json", r#"{"message":"forbidden"}"#),
-        (200, "application/json", r#"{"name":"settings"}"#),
+        (403, "application/json", r#"{"message":"forbidden"}"#),
         (200, "application/json", "{}"),
     ]);
     let home = temp_home();
@@ -1653,10 +1683,15 @@ fn namespace_create_continues_when_user_token_cannot_read_appnamespace_lookup() 
         requests[0].path,
         "/openapi/v1/apps/demo/appnamespaces/settings"
     );
-    assert_eq!(requests[1].method, "POST");
-    assert_eq!(requests[1].path, "/openapi/v1/apps/demo/appnamespaces");
+    assert_eq!(requests[1].method, "GET");
+    assert_eq!(
+        requests[1].path,
+        "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/settings"
+    );
     assert_eq!(requests[2].method, "POST");
     assert_eq!(requests[2].path, "/openapi/v1/namespaces");
+    let namespace_body: Value = serde_json::from_str(&requests[2].body).expect("json body");
+    assert_eq!(namespace_body[0]["appNamespaceName"], "settings");
 }
 
 #[test]
@@ -1783,6 +1818,62 @@ fn namespace_create_reuses_prefixed_public_when_unprefixed_private_exists() {
 }
 
 #[test]
+fn namespace_create_allows_prefixed_public_when_only_unprefixed_private_exists() {
+    let server = TestServer::sequence(vec![
+        (
+            200,
+            "application/json",
+            r#"{"name":"application.yml","isPublic":false}"#,
+        ),
+        (200, "application/json", r#"[]"#),
+        (200, "application/json", r#"{"name":"FX.application.yml"}"#),
+        (200, "application/json", "{}"),
+    ]);
+    let home = temp_home();
+    write_config(
+        &home,
+        &profile_config_with_operator(&server.url(), "apollo-bot"),
+    );
+
+    base_command(&home)
+        .env("APOLLO_TOKEN", "consumer-token")
+        .args([
+            "--yes",
+            "--output",
+            "json",
+            "namespace",
+            "create",
+            "--env",
+            "DEV",
+            "--app",
+            "demo",
+            "--public",
+            "application.yml",
+        ])
+        .assert()
+        .success();
+
+    let requests = server.requests(4);
+    assert_eq!(
+        requests[0].path,
+        "/openapi/v1/apps/demo/appnamespaces/application.yml"
+    );
+    assert_eq!(requests[1].path, "/openapi/v1/apps/demo/appnamespaces");
+    assert_eq!(requests[2].method, "POST");
+    assert_eq!(
+        requests[2].path,
+        "/openapi/v1/apps/demo/appnamespaces?appendNamespacePrefix=true"
+    );
+    assert_eq!(requests[3].method, "POST");
+    assert_eq!(
+        requests[3].path,
+        "/openapi/v1/namespaces?operator=apollo-bot"
+    );
+    let namespace_body: Value = serde_json::from_str(&requests[3].body).expect("json body");
+    assert_eq!(namespace_body[0]["appNamespaceName"], "FX.application.yml");
+}
+
+#[test]
 fn namespace_create_does_not_reuse_suffix_colliding_public_appnamespace() {
     let server = TestServer::sequence(vec![
         (404, "application/json", r#"{"message":"not found"}"#),
@@ -1878,7 +1969,7 @@ fn namespace_create_treats_empty_appnamespace_lookup_as_missing() {
 }
 
 #[test]
-fn namespace_create_rejects_public_flag_for_existing_private_appnamespace() {
+fn namespace_create_rejects_unprefixed_public_flag_for_existing_private_appnamespace() {
     let server = TestServer::sequence(vec![
         (
             200,
@@ -1906,6 +1997,7 @@ fn namespace_create_rejects_public_flag_for_existing_private_appnamespace() {
             "--app",
             "demo",
             "--public",
+            "--no-append-namespace-prefix",
             "application",
         ])
         .assert()

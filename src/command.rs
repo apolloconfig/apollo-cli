@@ -500,21 +500,18 @@ fn execute_app(
     match command {
         AppCommand::List { app_ids } => {
             if let Some(app_ids) = app_ids {
-                if openapi.context.auth_mode.is_user_token() {
-                    let path = append_query("/openapi/v1/apps".to_owned(), "appIds", &app_ids);
-                    openapi.request("GET", &path, None)
+                let path = if openapi.context.auth_mode.is_user_token() {
+                    "/openapi/v1/apps"
                 } else {
-                    let response =
-                        openapi
-                            .client
-                            .request("GET", "/openapi/v1/apps/authorized", None)?;
-                    let data = filter_apps_by_ids(response.data.clone(), &app_ids);
-                    Ok(render_openapi_response_with_data(
-                        &openapi.writer,
-                        &response,
-                        data,
-                    ))
-                }
+                    "/openapi/v1/apps/authorized"
+                };
+                let response = openapi.client.request("GET", path, None)?;
+                let data = filter_apps_by_ids(response.data.clone(), &app_ids);
+                Ok(render_openapi_response_with_data(
+                    &openapi.writer,
+                    &response,
+                    data,
+                ))
             } else {
                 let path = if openapi.context.auth_mode.is_user_token() {
                     "/openapi/v1/apps"
@@ -695,35 +692,54 @@ fn register_app_namespace(
     operator: Option<&str>,
 ) -> Result<RegisteredAppNamespace, CliError> {
     let registration = app_namespace_registration(namespace_name);
-    if let Some(existing) = find_app_namespace(openapi, app_id, namespace_name)? {
-        if public_namespace && matches!(existing.is_public, Some(false)) {
-            if append_namespace_prefix
-                && let Some(existing) =
-                    find_prefixed_public_app_namespace(openapi, app_id, &registration)?
+    let mut checked_prefixed_public = false;
+    match find_app_namespace(openapi, app_id, namespace_name)? {
+        AppNamespaceLookup::Found(existing) => {
+            if public_namespace && matches!(existing.is_public, Some(false)) {
+                if append_namespace_prefix {
+                    checked_prefixed_public = true;
+                    if let Some(existing) =
+                        find_prefixed_public_app_namespace(openapi, app_id, &registration)?
+                    {
+                        return Ok(RegisteredAppNamespace {
+                            name: existing.name,
+                            created: false,
+                        });
+                    }
+                } else {
+                    return Err(CliError::invalid_input(
+                        "existing app namespace is private; remove --public or create a public app namespace before reusing it",
+                        openapi.context.output,
+                    ));
+                }
+            }
+            if !public_namespace && matches!(existing.is_public, Some(true)) {
+                return Err(CliError::invalid_input(
+                    "existing app namespace is public; add --public to reuse it or choose a private app namespace name",
+                    openapi.context.output,
+                ));
+            }
+            if !(public_namespace
+                && append_namespace_prefix
+                && matches!(existing.is_public, Some(false)))
             {
                 return Ok(RegisteredAppNamespace {
                     name: existing.name,
                     created: false,
                 });
-            }
-            return Err(CliError::invalid_input(
-                "existing app namespace is private; remove --public or create a public app namespace before reusing it",
-                openapi.context.output,
-            ));
+            };
         }
-        if !public_namespace && matches!(existing.is_public, Some(true)) {
-            return Err(CliError::invalid_input(
-                "existing app namespace is public; add --public to reuse it or choose a private app namespace name",
-                openapi.context.output,
-            ));
+        AppNamespaceLookup::UnknownReadDenied => {
+            return Ok(RegisteredAppNamespace {
+                name: namespace_name.to_owned(),
+                created: false,
+            });
         }
-        return Ok(RegisteredAppNamespace {
-            name: existing.name,
-            created: false,
-        });
+        AppNamespaceLookup::Missing => {}
     }
     if public_namespace
         && append_namespace_prefix
+        && !checked_prefixed_public
         && let Some(existing) = find_prefixed_public_app_namespace(openapi, app_id, &registration)?
     {
         return Ok(RegisteredAppNamespace {
@@ -773,11 +789,17 @@ struct ExistingAppNamespace {
     is_public: Option<bool>,
 }
 
+enum AppNamespaceLookup {
+    Found(ExistingAppNamespace),
+    Missing,
+    UnknownReadDenied,
+}
+
 fn find_app_namespace(
     openapi: &OpenApiCommandContext,
     app_id: &str,
     namespace_name: &str,
-) -> Result<Option<ExistingAppNamespace>, CliError> {
+) -> Result<AppNamespaceLookup, CliError> {
     let path = format!(
         "/openapi/v1/apps/{}/appnamespaces/{}",
         encode_path_segment(app_id),
@@ -786,18 +808,20 @@ fn find_app_namespace(
     match openapi.client.request("GET", &path, None) {
         Ok(response) => {
             let Some(name) = response.data.get("name").and_then(Value::as_str) else {
-                return Ok(None);
+                return Ok(AppNamespaceLookup::Missing);
             };
             if name.trim().is_empty() {
-                return Ok(None);
+                return Ok(AppNamespaceLookup::Missing);
             }
-            Ok(Some(ExistingAppNamespace {
+            Ok(AppNamespaceLookup::Found(ExistingAppNamespace {
                 name: name.to_owned(),
                 is_public: response.data.get("isPublic").and_then(Value::as_bool),
             }))
         }
-        Err(error) if is_missing_app_namespace(&error) => Ok(None),
-        Err(error) if is_user_token_read_denied(openapi, &error) => Ok(None),
+        Err(error) if is_missing_app_namespace(&error) => Ok(AppNamespaceLookup::Missing),
+        Err(error) if is_user_token_read_denied(openapi, &error) => {
+            Ok(AppNamespaceLookup::UnknownReadDenied)
+        }
         Err(error) => Err(error),
     }
 }
