@@ -393,6 +393,51 @@ key = "old-dev"
         fs::read_to_string(credential_file_path(&home, "old-dev")).expect("old credential"),
         "old-secret\n"
     );
+    assert!(!credential_file_path(&home, "dev").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn auth_login_restores_same_file_credential_when_config_save_fails() {
+    let home = temp_home();
+    write_config(
+        &home,
+        r#"
+active_profile = "dev"
+
+[profiles.dev]
+server = "https://apollo-dev.example.com"
+auth_mode = "consumer-token"
+
+[profiles.dev.credential]
+backend = "file"
+key = "dev"
+"#,
+    );
+    fs::create_dir_all(credential_file_path(&home, "dev").parent().expect("parent"))
+        .expect("credential dir");
+    fs::write(credential_file_path(&home, "dev"), "old-secret\n").expect("old credential");
+    fs::set_permissions(config_path(&home), fs::Permissions::from_mode(0o400))
+        .expect("make config read-only");
+
+    let assert = base_command(&home)
+        .write_stdin("apollo_pat_test_token\n")
+        .args([
+            "--output",
+            "json",
+            "auth",
+            "login",
+            "--token-stdin",
+            "--store-token-in-file",
+        ])
+        .assert()
+        .failure();
+
+    assert!(assert.get_output().stdout.is_empty());
+    assert_eq!(
+        fs::read_to_string(credential_file_path(&home, "dev")).expect("credential"),
+        "old-secret"
+    );
 }
 
 #[test]

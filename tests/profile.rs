@@ -1,6 +1,9 @@
 use std::fs;
 use std::path::PathBuf;
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 use assert_cmd::Command;
 use predicates::prelude::predicate;
 use serde_json::Value;
@@ -790,6 +793,54 @@ key = "old-dev"
 
     assert!(!credential_file_path(&home, "old-dev").exists());
     assert!(credential_file_path(&home, "dev").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn profile_add_overwrite_restores_same_file_credential_when_config_save_fails() {
+    let home = temp_home();
+    write_config(
+        &home,
+        r#"
+active_profile = "dev"
+
+[profiles.dev]
+server = "https://apollo-old.example.com"
+auth_mode = "consumer-token"
+
+[profiles.dev.credential]
+backend = "file"
+key = "dev"
+"#,
+    );
+    fs::create_dir_all(credential_file_path(&home, "dev").parent().expect("parent"))
+        .expect("credential dir");
+    fs::write(credential_file_path(&home, "dev"), "old-secret\n").expect("old credential");
+    fs::set_permissions(config_path(&home), fs::Permissions::from_mode(0o400))
+        .expect("make config read-only");
+
+    let assert = base_command(&home)
+        .write_stdin("apollo_pat_new_token\n")
+        .args([
+            "--server",
+            "https://apollo-new.example.com",
+            "--output",
+            "json",
+            "profile",
+            "add",
+            "dev",
+            "--overwrite",
+            "--token-stdin",
+            "--store-token-in-file",
+        ])
+        .assert()
+        .failure();
+
+    assert!(assert.get_output().stdout.is_empty());
+    assert_eq!(
+        fs::read_to_string(credential_file_path(&home, "dev")).expect("credential"),
+        "old-secret"
+    );
 }
 
 #[test]

@@ -184,14 +184,18 @@ fn execute_auth(
                 AuthMode::UserToken,
                 writer_output,
             )?;
-            let credential_ref = store_setup_token(
+            let existing_credential =
+                previous_credential_for_profile(&profile, loaded.config.profiles.get(&profile));
+            let stored_credential = store_setup_token(
                 &loaded.path,
                 &profile,
                 &token,
                 store_token_in_file,
                 is_interactive_terminal(),
                 writer_output,
+                existing_credential.as_ref(),
             )?;
+            let credential_ref = stored_credential.credential_ref.clone();
             let replaced_credential = replaced_credential_to_delete(
                 &profile,
                 loaded.config.profiles.get(&profile),
@@ -208,7 +212,12 @@ fn execute_auth(
                 profile_config.operator = None;
             }
             profile_config.credential = Some(credential_ref.clone());
-            save_config(&loaded.path, &config, writer_output)?;
+            save_config_or_rollback_credential(
+                &loaded.path,
+                &config,
+                stored_credential.rollback_on_config_error,
+                writer_output,
+            )?;
             delete_replaced_credential(&loaded.path, replaced_credential, writer_output)?;
 
             let response = AuthLoginResponse {
@@ -414,7 +423,8 @@ fn execute_profile_setup(
         credential: preserved_setup_credential(existing_profile, setup_token.as_ref()),
     };
 
-    let credential = setup_token
+    let existing_credential = previous_credential_for_profile(&profile_name, existing_profile);
+    let stored_credential = setup_token
         .as_ref()
         .map(|token| {
             store_setup_token(
@@ -424,14 +434,18 @@ fn execute_profile_setup(
                 options.store_token_in_file,
                 interactive,
                 writer_output,
+                existing_credential.as_ref(),
             )
         })
         .transpose()?;
-    let replaced_credential = credential.as_ref().and_then(|credential| {
-        replaced_credential_to_delete(&profile_name, existing_profile, credential)
+    let credential_ref = stored_credential
+        .as_ref()
+        .map(|stored_credential| stored_credential.credential_ref.clone());
+    let replaced_credential = credential_ref.as_ref().and_then(|credential_ref| {
+        replaced_credential_to_delete(&profile_name, existing_profile, credential_ref)
     });
-    if let Some(credential) = credential.clone() {
-        profile_config.credential = Some(credential);
+    if let Some(credential_ref) = credential_ref.clone() {
+        profile_config.credential = Some(credential_ref);
     }
 
     let mut config = loaded.config.clone();
@@ -444,7 +458,15 @@ fn execute_profile_setup(
     if should_set_active {
         config.active_profile = Some(profile_name.clone());
     }
-    save_config(&loaded.path, &config, writer_output)?;
+    match stored_credential {
+        Some(stored_credential) => save_config_or_rollback_credential(
+            &loaded.path,
+            &config,
+            stored_credential.rollback_on_config_error,
+            writer_output,
+        )?,
+        None => save_config(&loaded.path, &config, writer_output)?,
+    }
     delete_replaced_credential(&loaded.path, replaced_credential, writer_output)?;
     let response_credential = config
         .profiles
@@ -1046,6 +1068,7 @@ fn execute_release(
     let openapi = openapi_context(cli, output)?;
     match command {
         ReleaseCommand::List { scope, page, size } => {
+            ensure_consumer_token_scoped_read_supported(&openapi, "release list")?;
             let mut path = format!("{}/releases/active", namespace_path(&scope));
             path = append_query(path, "page", &page.unwrap_or(DEFAULT_PAGE).to_string());
             path = append_query(path, "size", &size.unwrap_or(DEFAULT_PAGE_SIZE).to_string());
@@ -1962,6 +1985,19 @@ fn reject_auth_mode_change_without_token(
     Ok(())
 }
 
+struct StoredCredential {
+    credential_ref: CredentialRef,
+    rollback_on_config_error: CredentialRollback,
+}
+
+enum CredentialRollback {
+    Delete(CredentialRef),
+    Restore {
+        credential_ref: CredentialRef,
+        token: Option<Sensitive>,
+    },
+}
+
 fn preserved_setup_credential(
     existing_profile: Option<&ProfileConfig>,
     token: Option<&Sensitive>,
@@ -1973,17 +2009,84 @@ fn preserved_setup_credential(
     existing_profile.credential.clone()
 }
 
+fn previous_credential_for_profile(
+    profile_name: &str,
+    existing_profile: Option<&ProfileConfig>,
+) -> Option<CredentialRef> {
+    existing_profile.map(|profile| {
+        profile
+            .credential
+            .clone()
+            .unwrap_or_else(|| credential::implicit_native_ref(profile_name))
+    })
+}
+
 fn replaced_credential_to_delete(
     profile_name: &str,
     existing_profile: Option<&ProfileConfig>,
     replacement: &CredentialRef,
 ) -> Option<CredentialRef> {
-    let existing_profile = existing_profile?;
-    let previous = existing_profile
-        .credential
-        .clone()
-        .unwrap_or_else(|| credential::implicit_native_ref(profile_name));
+    let previous = previous_credential_for_profile(profile_name, existing_profile)?;
     (previous != *replacement).then_some(previous)
+}
+
+fn credential_rollback_for_replacement(
+    config_path: &std::path::Path,
+    replacement: &CredentialRef,
+    previous_credential: Option<&CredentialRef>,
+    output: OutputFormat,
+) -> Result<CredentialRollback, CliError> {
+    if previous_credential == Some(replacement) {
+        let token = credential::get(config_path, replacement)
+            .map_err(|error| CliError::credential_store_unavailable(&error, output))?;
+        return Ok(CredentialRollback::Restore {
+            credential_ref: replacement.clone(),
+            token,
+        });
+    }
+
+    Ok(CredentialRollback::Delete(replacement.clone()))
+}
+
+fn save_config_or_rollback_credential(
+    config_path: &std::path::Path,
+    config: &crate::config::AppConfig,
+    rollback: CredentialRollback,
+    output: OutputFormat,
+) -> Result<(), CliError> {
+    if let Err(save_error) = save_config(config_path, config, output) {
+        rollback_stored_credential(config_path, rollback, output)?;
+        return Err(save_error);
+    }
+    Ok(())
+}
+
+fn rollback_stored_credential(
+    config_path: &std::path::Path,
+    rollback: CredentialRollback,
+    output: OutputFormat,
+) -> Result<(), CliError> {
+    match rollback {
+        CredentialRollback::Delete(credential_ref) => {
+            credential::delete(config_path, &credential_ref)
+                .map_err(|error| CliError::credential_store_unavailable(&error, output))?;
+        }
+        CredentialRollback::Restore {
+            credential_ref,
+            token: Some(token),
+        } => {
+            credential::store(config_path, &credential_ref, &token)
+                .map_err(|error| CliError::credential_store_unavailable(&error, output))?;
+        }
+        CredentialRollback::Restore {
+            credential_ref,
+            token: None,
+        } => {
+            credential::delete(config_path, &credential_ref)
+                .map_err(|error| CliError::credential_store_unavailable(&error, output))?;
+        }
+    }
+    Ok(())
 }
 
 fn delete_replaced_credential(
@@ -2061,14 +2164,74 @@ fn store_setup_token(
     store_token_in_file: bool,
     interactive: bool,
     output: OutputFormat,
-) -> Result<CredentialRef, CliError> {
+    previous_credential: Option<&CredentialRef>,
+) -> Result<StoredCredential, CliError> {
     if store_token_in_file {
-        return credential::store_file(config_path, profile, token)
-            .map_err(|error| CliError::credential_store_unavailable(&error, output));
+        let credential_ref = CredentialRef {
+            backend: "file".to_owned(),
+            key: profile.to_owned(),
+        };
+        let rollback_on_config_error = credential_rollback_for_replacement(
+            config_path,
+            &credential_ref,
+            previous_credential,
+            output,
+        )?;
+        credential::store_file(config_path, profile, token)
+            .map_err(|error| CliError::credential_store_unavailable(&error, output))?;
+        return Ok(StoredCredential {
+            credential_ref,
+            rollback_on_config_error,
+        });
     }
 
+    let native_credential_ref = CredentialRef {
+        backend: "native".to_owned(),
+        key: profile.to_owned(),
+    };
+    let native_rollback_on_config_error = match credential_rollback_for_replacement(
+        config_path,
+        &native_credential_ref,
+        previous_credential,
+        output,
+    ) {
+        Ok(rollback) => rollback,
+        Err(_) => {
+            if interactive
+                && prompt_yes_no(
+                    "Native credential storage is unavailable. Store token in a local file instead?",
+                    false,
+                    output,
+                )?
+            {
+                let credential_ref = CredentialRef {
+                    backend: "file".to_owned(),
+                    key: profile.to_owned(),
+                };
+                let rollback_on_config_error = credential_rollback_for_replacement(
+                    config_path,
+                    &credential_ref,
+                    previous_credential,
+                    output,
+                )?;
+                credential::store_file(config_path, profile, token)
+                    .map_err(|error| CliError::credential_store_unavailable(&error, output))?;
+                return Ok(StoredCredential {
+                    credential_ref,
+                    rollback_on_config_error,
+                });
+            }
+            return Err(CliError::confirmation_required(
+                "Native credential storage is unavailable. Re-run with --store-token-in-file to use the explicit file fallback.",
+                output,
+            ));
+        }
+    };
     match credential::store_native(profile, token) {
-        Ok(credential) => Ok(credential),
+        Ok(credential_ref) => Ok(StoredCredential {
+            credential_ref,
+            rollback_on_config_error: native_rollback_on_config_error,
+        }),
         Err(error) => {
             if interactive
                 && prompt_yes_no(
@@ -2077,8 +2240,22 @@ fn store_setup_token(
                     output,
                 )?
             {
+                let credential_ref = CredentialRef {
+                    backend: "file".to_owned(),
+                    key: profile.to_owned(),
+                };
+                let rollback_on_config_error = credential_rollback_for_replacement(
+                    config_path,
+                    &credential_ref,
+                    previous_credential,
+                    output,
+                )?;
                 credential::store_file(config_path, profile, token)
-                    .map_err(|error| CliError::credential_store_unavailable(&error, output))
+                    .map_err(|error| CliError::credential_store_unavailable(&error, output))?;
+                Ok(StoredCredential {
+                    credential_ref,
+                    rollback_on_config_error,
+                })
             } else {
                 Err(CliError::confirmation_required(
                     &format!(

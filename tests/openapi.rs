@@ -473,6 +473,9 @@ fn consumer_token_scoped_reads_fail_closed_without_namespace_scope() {
             "demo",
             "application",
         ],
+        vec![
+            "--output", "json", "release", "list", "--env", "DEV", "--app", "demo",
+        ],
     ] {
         let assert = base_command(&home)
             .env("APOLLO_TOKEN", "consumer-token")
@@ -568,7 +571,7 @@ fn namespace_config_and_release_commands_map_to_openapi_paths() {
     let release_server = TestServer::json(r#"[{"id":1,"name":"release-1"}]"#);
     write_config(&home, &profile_config(&release_server.url()));
     base_command(&home)
-        .env("APOLLO_TOKEN", "consumer-token")
+        .env("APOLLO_TOKEN", "apollo_pat_test_token")
         .args([
             "--output", "json", "release", "list", "--env", "DEV", "--app", "demo",
         ])
@@ -632,7 +635,7 @@ fn list_commands_redact_broad_config_values() {
     );
     write_config(&home, &profile_config(&release_server.url()));
     let assert = base_command(&home)
-        .env("APOLLO_TOKEN", "consumer-token")
+        .env("APOLLO_TOKEN", "apollo_pat_test_token")
         .args([
             "--output", "json", "release", "list", "--env", "DEV", "--app", "demo",
         ])

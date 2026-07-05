@@ -262,6 +262,25 @@ pub fn store_native(key: &str, token: &Sensitive) -> Result<CredentialRef, Strin
     })
 }
 
+pub fn get(config_path: &Path, credential: &CredentialRef) -> Result<Option<Sensitive>, String> {
+    token_from_store(config_path, credential)
+}
+
+pub fn store(
+    config_path: &Path,
+    credential: &CredentialRef,
+    token: &Sensitive,
+) -> Result<(), String> {
+    match credential.backend.as_str() {
+        "file" => FileCredentialStore::new(config_path).set(&credential.key, token),
+        "native" => NativeCredentialStore.set(&credential.key, token),
+        "env" => {
+            Err("APOLLO_TOKEN is provided by the environment and cannot be changed".to_owned())
+        }
+        backend => Err(format!("unsupported credential backend `{backend}`")),
+    }
+}
+
 pub fn delete(config_path: &Path, credential: &CredentialRef) -> Result<(), String> {
     match credential.backend.as_str() {
         "file" => FileCredentialStore::new(config_path).delete(&credential.key),
