@@ -1777,6 +1777,14 @@ fn namespace_path(scope: &NamespaceScopeArgs) -> String {
 }
 
 fn item_read_path(scope: &NamespaceScopeArgs, key: &str) -> String {
+    item_path(scope, key)
+}
+
+fn item_write_path(scope: &NamespaceScopeArgs, key: &str) -> String {
+    item_path(scope, key)
+}
+
+fn item_path(scope: &NamespaceScopeArgs, key: &str) -> String {
     if key.contains('/') || key.contains('\\') {
         format!(
             "{}/encodedItems/{}",
@@ -1790,14 +1798,6 @@ fn item_read_path(scope: &NamespaceScopeArgs, key: &str) -> String {
             encode_path_segment(key)
         )
     }
-}
-
-fn item_write_path(scope: &NamespaceScopeArgs, key: &str) -> String {
-    format!(
-        "{}/items/{}",
-        namespace_path(scope),
-        encode_path_segment(key)
-    )
 }
 
 fn source_sync_items(

@@ -269,9 +269,21 @@ fn normalize_openapi_path(path: &str, format: OutputFormat) -> Result<String, Cl
 fn reject_dot_segments(path: &str, format: OutputFormat) -> Result<(), CliError> {
     let path_without_query = path.split('?').next().unwrap_or(path);
     for segment in path_without_query.split('/') {
+        if segment.contains('\\') {
+            return Err(CliError::invalid_input(
+                "OpenAPI path must not contain backslash path separators",
+                format,
+            ));
+        }
         let decoded = urlencoding::decode(segment).map_err(|_| {
             CliError::invalid_input("OpenAPI path contains invalid percent-encoding", format)
         })?;
+        if decoded.contains('\\') {
+            return Err(CliError::invalid_input(
+                "OpenAPI path must not contain backslash path separators",
+                format,
+            ));
+        }
         if decoded == "." || decoded == ".." {
             return Err(CliError::invalid_input(
                 "OpenAPI path must not contain . or .. path segments",

@@ -108,6 +108,33 @@ fn api_passthrough_rejects_dot_segment_openapi_paths() {
 }
 
 #[test]
+fn api_passthrough_rejects_backslash_path_separators() {
+    let home = temp_home();
+
+    for path in ["/openapi/v1/..\\apps", "/openapi/v1/%5capps"] {
+        let assert = base_command(&home)
+            .env("APOLLO_TOKEN", "consumer-token")
+            .args([
+                "--server",
+                "http://127.0.0.1:9",
+                "--output",
+                "json",
+                "api",
+                "get",
+                path,
+            ])
+            .assert()
+            .failure();
+
+        assert!(assert.get_output().stdout.is_empty());
+        let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf8 stderr");
+        let json: Value = serde_json::from_str(&stderr).expect("json stderr");
+        assert_eq!(json["error"]["code"], "invalid_input");
+        assert!(stderr.contains("backslash path separators"));
+    }
+}
+
+#[test]
 fn stored_user_token_profile_uses_bearer_header() {
     let server = TestServer::json(r#"[{"appId":"demo"}]"#);
     let home = temp_home();
@@ -1118,7 +1145,7 @@ fn config_item_commands_use_encoded_items_for_path_sensitive_keys() {
         .success();
     assert_eq!(
         set_server.request().path,
-        "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/application/items/logging%2Flevel?createIfNotExists=true"
+        "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/application/encodedItems/bG9nZ2luZy9sZXZlbA?createIfNotExists=true"
     );
 
     let delete_server = TestServer::empty();
@@ -1144,7 +1171,7 @@ fn config_item_commands_use_encoded_items_for_path_sensitive_keys() {
         .success();
     assert_eq!(
         delete_server.request().path,
-        "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/application/items/logging%2Flevel?operator=apollo-bot"
+        "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/application/encodedItems/bG9nZ2luZy9sZXZlbA?operator=apollo-bot"
     );
 }
 
