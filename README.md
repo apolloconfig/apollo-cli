@@ -1,5 +1,7 @@
 # Apollo CLI
 
+[中文](README.zh.md)
+
 `apollo-cli` is the standalone Rust repository for the `apollo` command-line interface.
 
 This repository currently covers the first Apollo CLI v0 slices:
