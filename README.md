@@ -312,6 +312,57 @@ Path and payload mapping follows the current Apollo Portal OpenAPI contract, inc
 Mutating commands require `--yes`. Without it, the CLI returns `confirmation_required` before
 opening a network connection.
 
+## Binary releases
+
+Manual release runs publish prebuilt `apollo` executables on the
+[GitHub Releases page](https://github.com/apolloconfig/apollo-cli/releases):
+
+| Platform | Rust target | Archive |
+|---|---|---|
+| Linux x86-64 | `x86_64-unknown-linux-gnu` | `.tar.gz` |
+| Linux ARM64 | `aarch64-unknown-linux-gnu` | `.tar.gz` |
+| macOS Intel | `x86_64-apple-darwin` | `.tar.gz` |
+| macOS Apple silicon | `aarch64-apple-darwin` | `.tar.gz` |
+| Windows x86-64 | `x86_64-pc-windows-msvc` | `.zip` |
+
+Archive names follow `apollo-<tag>-<target>.<extension>`. Each archive contains the executable,
+license, and English and Chinese READMEs. Releases also include `SHA256SUMS` and GitHub build
+provenance attestations for every uploaded archive and checksum file.
+
+For example, download and verify a release with the GitHub CLI:
+
+```bash
+version=v0.1.0
+mkdir "apollo-${version}"
+gh release download "${version}" \
+  --repo apolloconfig/apollo-cli \
+  --dir "apollo-${version}"
+(cd "apollo-${version}" && sha256sum --check SHA256SUMS)
+gh attestation verify \
+  "apollo-${version}/apollo-${version}-x86_64-unknown-linux-gnu.tar.gz" \
+  --repo apolloconfig/apollo-cli
+```
+
+On macOS, use `shasum -a 256 -c SHA256SUMS` for the checksum step.
+
+For maintainers, first merge the intended package version and updated `Cargo.lock` into the default
+branch. Then open **Actions → Release → Run workflow**, keep the default branch selected, and enter
+the SemVer without a leading `v`. The same release can be started with the GitHub CLI:
+
+```bash
+gh workflow run release.yml \
+  --repo apolloconfig/apollo-cli \
+  --ref main \
+  -f version=0.1.0
+```
+
+The workflow rejects malformed versions, versions that do not match `Cargo.toml`, non-default-branch
+runs, and versions whose tag or Release already exists. It reruns formatting, Clippy, and tests;
+builds and smoke-tests all five native targets; and creates checksums and attestations. Only after
+those checks pass does it create the `v<version>` tag at the exact workflow commit, generate release
+notes, verify the complete draft asset set, and publish the Release. Versions containing a SemVer
+prerelease suffix are published as prereleases.
+
 ## Local development
 
 Build the CLI:
