@@ -1,0 +1,384 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "SemVer without v; must match Cargo.toml (for example 0.1.0)"
+        required: true
+        type: string
+
+run-name: Release v${{ inputs.version }}
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+      source_sha: ${{ steps.version.outputs.source_sha }}
+    steps:
+      - name: Check out the selected commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+        with:
+          toolchain: stable
+
+      - name: Cache Rust build data
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: release-validation
+
+      - name: Validate version and release preconditions
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_VERSION: ${{ inputs.version }}
+          SOURCE_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version="${REQUESTED_VERSION}"
+          semver_pattern='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+([.][0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+([.][0-9A-Za-z-]+)*)?$'
+          if [[ ! "${version}" =~ ${semver_pattern} ]]; then
+            echo "::error::Version '${version}' is not valid SemVer; enter a value such as 0.1.0 or 0.1.0-rc.1 without a leading v"
+            exit 1
+          fi
+
+          default_branch="$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.default_branch')"
+          if [[ "${GITHUB_REF}" != "refs/heads/${default_branch}" ]]; then
+            echo "::error::Run this workflow from the default branch '${default_branch}', not '${GITHUB_REF}'"
+            exit 1
+          fi
+          remote_default_sha="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${default_branch}" --jq '.sha')"
+          if [[ "${SOURCE_SHA}" != "${remote_default_sha}" ]]; then
+            echo "::error::Selected commit ${SOURCE_SHA} is no longer the head of ${default_branch}; start a new release run"
+            exit 1
+          fi
+          if [[ "$(git rev-parse HEAD)" != "${SOURCE_SHA}" ]]; then
+            echo "::error::Checked-out commit does not match the workflow source commit"
+            exit 1
+          fi
+
+          package_version="$(cargo metadata --locked --no-deps --format-version 1 \
+            | jq -er '.packages[] | select(.name == "apollo-cli") | .version')"
+          if [[ "${version}" != "${package_version}" ]]; then
+            echo "::error::Requested version ${version} does not match Cargo package version ${package_version}"
+            exit 1
+          fi
+
+          tag="v${version}"
+          matching_refs="$(gh api "repos/${GITHUB_REPOSITORY}/git/matching-refs/tags/${tag}")"
+          if jq -e --arg expected "refs/tags/${tag}" \
+            'any(.ref == $expected)' <<<"${matching_refs}" >/dev/null; then
+            echo "::error::Tag ${tag} already exists"
+            exit 1
+          fi
+          if gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "::error::Release ${tag} already exists"
+            exit 1
+          fi
+
+          prerelease=false
+          if [[ "${version}" == *-* ]]; then
+            prerelease=true
+          fi
+
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "prerelease=${prerelease}" >> "${GITHUB_OUTPUT}"
+          echo "source_sha=${SOURCE_SHA}" >> "${GITHUB_OUTPUT}"
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Run Clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Run tests
+        run: cargo test --locked
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            archive: tar.gz
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            archive: tar.gz
+          - os: macos-14
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+            archive: zip
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - name: Check out the release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate.outputs.source_sha }}
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust build data
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: release-${{ matrix.target }}
+
+      - name: Build and smoke-test executable
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cargo build --release --locked --target "${{ matrix.target }}"
+
+          binary="target/${{ matrix.target }}/release/apollo"
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            binary="${binary}.exe"
+          fi
+
+          actual_version="$("${binary}" --version | tr -d '\r')"
+          expected_version="apollo ${{ needs.validate.outputs.version }}"
+          if [[ "${actual_version}" != "${expected_version}" ]]; then
+            echo "::error::Expected '${expected_version}', got '${actual_version}'"
+            exit 1
+          fi
+
+      - name: Package Unix executable
+        if: matrix.archive == 'tar.gz'
+        env:
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          package="apollo-${RELEASE_TAG}-${{ matrix.target }}"
+          package_dir="${GITHUB_WORKSPACE}/dist/${package}"
+          archive="${GITHUB_WORKSPACE}/dist/${package}.tar.gz"
+
+          mkdir -p "${package_dir}"
+          install -m 0755 "target/${{ matrix.target }}/release/apollo" "${package_dir}/apollo"
+          cp LICENSE README.md README.zh.md "${package_dir}/"
+          tar -czf "${archive}" -C "${GITHUB_WORKSPACE}/dist" "${package}"
+
+      - name: Package Windows executable
+        if: matrix.archive == 'zip'
+        env:
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $package = "apollo-$env:RELEASE_TAG-${{ matrix.target }}"
+          $packageDir = Join-Path $env:GITHUB_WORKSPACE "dist/$package"
+          $archive = Join-Path $env:GITHUB_WORKSPACE "dist/$package.zip"
+
+          New-Item -ItemType Directory -Force -Path $packageDir | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/apollo.exe" $packageDir
+          Copy-Item LICENSE, README.md, README.zh.md $packageDir
+          Compress-Archive -Path $packageDir -DestinationPath $archive -CompressionLevel Optimal
+
+      - name: Upload packaged executable
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/apollo-${{ needs.validate.outputs.tag }}-${{ matrix.target }}.${{ matrix.archive }}
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub release
+    needs:
+      - validate
+      - build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Download packaged executables
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Validate release assets
+        env:
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tag="${RELEASE_TAG}"
+          expected=(
+            "apollo-${tag}-aarch64-apple-darwin.tar.gz"
+            "apollo-${tag}-aarch64-unknown-linux-gnu.tar.gz"
+            "apollo-${tag}-x86_64-apple-darwin.tar.gz"
+            "apollo-${tag}-x86_64-pc-windows-msvc.zip"
+            "apollo-${tag}-x86_64-unknown-linux-gnu.tar.gz"
+          )
+
+          mapfile -t actual < <(find dist -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort)
+          if [[ "$(printf '%s\n' "${actual[@]}")" != "$(printf '%s\n' "${expected[@]}")" ]]; then
+            echo "::error::Downloaded assets do not match the release matrix"
+            printf 'Expected:\n%s\nActual:\n%s\n' \
+              "$(printf '  %s\n' "${expected[@]}")" \
+              "$(printf '  %s\n' "${actual[@]}")"
+            exit 1
+          fi
+
+          for archive in dist/*.tar.gz; do
+            package="$(basename "${archive}" .tar.gz)"
+            tar -tzf "${archive}" | grep -Fx "${package}/apollo" >/dev/null
+          done
+          for archive in dist/*.zip; do
+            package="$(basename "${archive}" .zip)"
+            unzip -tq "${archive}"
+            unzip -Z1 "${archive}" | tr '\\' '/' | grep -Fx "${package}/apollo.exe" >/dev/null
+          done
+
+      - name: Create checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          (
+            cd dist
+            LC_ALL=C sha256sum apollo-* | sort -k2 > SHA256SUMS
+            sha256sum --check SHA256SUMS
+          )
+
+      - name: Attest release assets
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: "${{ github.workspace }}/dist/*"
+
+      - name: Create tag, write release notes, and publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_PRERELEASE: ${{ needs.validate.outputs.prerelease }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+          SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tag="${RELEASE_TAG}"
+          matching_refs="$(gh api "repos/${GITHUB_REPOSITORY}/git/matching-refs/tags/${tag}")"
+          if jq -e --arg expected "refs/tags/${tag}" \
+            'any(.ref == $expected)' <<<"${matching_refs}" >/dev/null; then
+            echo "::error::Tag ${tag} was created while this workflow was running"
+            exit 1
+          fi
+          if gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "::error::Release ${tag} was created while this workflow was running"
+            exit 1
+          fi
+
+          create_args=(
+            --repo "${GITHUB_REPOSITORY}"
+            --target "${SOURCE_SHA}"
+            --draft
+            --title "Apollo CLI ${tag}"
+            --generate-notes
+            --fail-on-no-commits
+          )
+          if [[ "${EXPECTED_PRERELEASE}" == "true" ]]; then
+            create_args+=(--prerelease)
+          fi
+          gh release create "${tag}" "${create_args[@]}" dist/*
+
+          tag_json="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}")"
+          tag_object_type="$(jq -r '.object.type' <<<"${tag_json}")"
+          tag_object_sha="$(jq -r '.object.sha' <<<"${tag_json}")"
+          if [[ "${tag_object_type}" == "tag" ]]; then
+            tag_object_sha="$(gh api \
+              "repos/${GITHUB_REPOSITORY}/git/tags/${tag_object_sha}" \
+              --jq '.object.sha')"
+          elif [[ "${tag_object_type}" != "commit" ]]; then
+            echo "::error::Tag ${tag} points to unexpected object type ${tag_object_type}"
+            exit 1
+          fi
+          if [[ "${tag_object_sha}" != "${SOURCE_SHA}" ]]; then
+            echo "::error::Tag ${tag} points to ${tag_object_sha}, expected ${SOURCE_SHA}"
+            exit 1
+          fi
+
+          draft_json="$(gh release view "${tag}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --json isDraft,isPrerelease,body)"
+          if ! jq -e \
+            --argjson expected_prerelease "${EXPECTED_PRERELEASE}" \
+            '.isDraft == true
+              and .isPrerelease == $expected_prerelease
+              and (.body | length) > 0' \
+            <<<"${draft_json}" >/dev/null; then
+            echo "::error::Draft release state or generated release notes are invalid"
+            exit 1
+          fi
+
+          mapfile -t local_assets < <(find dist -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort)
+          mapfile -t remote_assets < <(gh release view "${tag}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --json assets \
+            --jq '.assets[].name' | LC_ALL=C sort)
+          if [[ "$(printf '%s\n' "${local_assets[@]}")" != "$(printf '%s\n' "${remote_assets[@]}")" ]]; then
+            echo "::error::Draft release assets do not match locally verified assets"
+            exit 1
+          fi
+
+          gh release edit "${tag}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --draft=false \
+            --prerelease="${EXPECTED_PRERELEASE}"
+
+          release_json="$(gh release view "${tag}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --json isDraft,isPrerelease,body,url)"
+          if ! jq -e \
+            --argjson expected_prerelease "${EXPECTED_PRERELEASE}" \
+            '.isDraft == false
+              and .isPrerelease == $expected_prerelease
+              and (.body | length) > 0' \
+            <<<"${release_json}" >/dev/null; then
+            echo "::error::Published release state is incorrect"
+            exit 1
+          fi
+
+          echo "Published $(jq -r '.url' <<<"${release_json}")"

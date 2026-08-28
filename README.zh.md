@@ -277,6 +277,56 @@ apollo --profile dev auth capabilities
 
 变更类命令要求传 `--yes`。如果没有传，CLI 会在建立网络连接之前返回 `confirmation_required`。
 
+## 可执行文件发布
+
+手动运行发布 workflow 后，预编译的 `apollo` 可执行文件会发布到
+[GitHub Releases 页面](https://github.com/apolloconfig/apollo-cli/releases)：
+
+| 平台 | Rust target | 压缩格式 |
+|---|---|---|
+| Linux x86-64 | `x86_64-unknown-linux-gnu` | `.tar.gz` |
+| Linux ARM64 | `aarch64-unknown-linux-gnu` | `.tar.gz` |
+| macOS Intel | `x86_64-apple-darwin` | `.tar.gz` |
+| macOS Apple 芯片 | `aarch64-apple-darwin` | `.tar.gz` |
+| Windows x86-64 | `x86_64-pc-windows-msvc` | `.zip` |
+
+压缩包统一命名为 `apollo-<tag>-<target>.<extension>`，其中包含可执行文件、许可证以及中英文
+README。每个 Release 还会提供 `SHA256SUMS`，并为全部上传的压缩包和 checksum 文件生成 GitHub
+构建来源证明。
+
+例如，可以使用 GitHub CLI 下载并校验一个版本：
+
+```bash
+version=v0.1.0
+mkdir "apollo-${version}"
+gh release download "${version}" \
+  --repo apolloconfig/apollo-cli \
+  --dir "apollo-${version}"
+(cd "apollo-${version}" && sha256sum --check SHA256SUMS)
+gh attestation verify \
+  "apollo-${version}/apollo-${version}-x86_64-unknown-linux-gnu.tar.gz" \
+  --repo apolloconfig/apollo-cli
+```
+
+macOS 的 checksum 校验命令请使用 `shasum -a 256 -c SHA256SUMS`。
+
+维护者发布时，先把目标 package version 和更新后的 `Cargo.lock` 合并到默认分支。然后进入
+**Actions → Release → Run workflow**，保持选择默认分支，并填写不带前导 `v` 的 SemVer。
+也可以通过 GitHub CLI 启动同一条发布流程：
+
+```bash
+gh workflow run release.yml \
+  --repo apolloconfig/apollo-cli \
+  --ref main \
+  -f version=0.1.0
+```
+
+workflow 会拒绝格式错误、与 `Cargo.toml` 不一致、不是从默认分支启动，或者 tag/Release 已存在
+的版本。随后重新执行格式化、Clippy 和测试，为五个原生 target 构建并冒烟验证可执行文件，生成
+checksum 与构建来源证明。全部检查通过后，才会在本次 workflow 的精确 commit 上创建
+`v<version>` tag，自动生成 release notes，核对草稿 Release 的完整附件集合并公开发布。版本中含有
+SemVer 预发布后缀时，会发布为 prerelease。
+
 ## 本地开发
 
 构建 CLI：
