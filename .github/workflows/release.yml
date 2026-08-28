@@ -324,6 +324,46 @@ jobs:
           fi
           gh release create "${tag}" "${create_args[@]}" dist/*
 
+          draft_json="$(gh release view "${tag}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --json tagName,targetCommitish,isDraft,isPrerelease,body)"
+          if ! jq -e \
+            --arg expected_tag "${tag}" \
+            --arg expected_target "${SOURCE_SHA}" \
+            --argjson expected_prerelease "${EXPECTED_PRERELEASE}" \
+            '.tagName == $expected_tag
+              and .targetCommitish == $expected_target
+              and .isDraft == true
+              and .isPrerelease == $expected_prerelease
+              and (.body | length) > 0' \
+            <<<"${draft_json}" >/dev/null; then
+            echo "::error::Draft release target, state, or generated release notes are invalid"
+            exit 1
+          fi
+
+          mapfile -t local_assets < <(find dist -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort)
+          mapfile -t remote_assets < <(gh release view "${tag}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --json assets \
+            --jq '.assets[].name' | LC_ALL=C sort)
+          if [[ "$(printf '%s\n' "${local_assets[@]}")" != "$(printf '%s\n' "${remote_assets[@]}")" ]]; then
+            echo "::error::Draft release assets do not match locally verified assets"
+            exit 1
+          fi
+
+          matching_refs="$(gh api "repos/${GITHUB_REPOSITORY}/git/matching-refs/tags/${tag}")"
+          if jq -e --arg expected "refs/tags/${tag}" \
+            'any(.ref == $expected)' <<<"${matching_refs}" >/dev/null; then
+            echo "::error::Tag ${tag} was created while the draft release was being verified"
+            exit 1
+          fi
+
+          gh release edit "${tag}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --draft=false \
+            --prerelease="${EXPECTED_PRERELEASE}" \
+            --target "${SOURCE_SHA}"
+
           tag_json="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}")"
           tag_object_type="$(jq -r '.object.type' <<<"${tag_json}")"
           tag_object_sha="$(jq -r '.object.sha' <<<"${tag_json}")"
@@ -340,40 +380,14 @@ jobs:
             exit 1
           fi
 
-          draft_json="$(gh release view "${tag}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --json isDraft,isPrerelease,body)"
-          if ! jq -e \
-            --argjson expected_prerelease "${EXPECTED_PRERELEASE}" \
-            '.isDraft == true
-              and .isPrerelease == $expected_prerelease
-              and (.body | length) > 0' \
-            <<<"${draft_json}" >/dev/null; then
-            echo "::error::Draft release state or generated release notes are invalid"
-            exit 1
-          fi
-
-          mapfile -t local_assets < <(find dist -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort)
-          mapfile -t remote_assets < <(gh release view "${tag}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --json assets \
-            --jq '.assets[].name' | LC_ALL=C sort)
-          if [[ "$(printf '%s\n' "${local_assets[@]}")" != "$(printf '%s\n' "${remote_assets[@]}")" ]]; then
-            echo "::error::Draft release assets do not match locally verified assets"
-            exit 1
-          fi
-
-          gh release edit "${tag}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --draft=false \
-            --prerelease="${EXPECTED_PRERELEASE}"
-
           release_json="$(gh release view "${tag}" \
             --repo "${GITHUB_REPOSITORY}" \
-            --json isDraft,isPrerelease,body,url)"
+            --json tagName,isDraft,isPrerelease,body,url)"
           if ! jq -e \
+            --arg expected_tag "${tag}" \
             --argjson expected_prerelease "${EXPECTED_PRERELEASE}" \
-            '.isDraft == false
+            '.tagName == $expected_tag
+              and .isDraft == false
               and .isPrerelease == $expected_prerelease
               and (.body | length) > 0' \
             <<<"${release_json}" >/dev/null; then
