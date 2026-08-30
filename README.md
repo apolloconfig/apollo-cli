@@ -84,6 +84,9 @@ The current scaffold parses these global flags before subcommands:
 - `--output json|table`
 - `--yes`
 
+`--yes` explicitly approves a mutating OpenAPI request without an interactive prompt. It does not
+skip target-plan construction, validation, redaction, or operation reporting.
+
 ## Guided setup
 
 Use `apollo init` for first-time setup. It creates a profile, writes non-secret profile metadata to
@@ -274,7 +277,8 @@ Structured JSON errors include:
 - `code`: stable error code
 - `category`: stable category
 - `message`: human-readable message
-- optional non-sensitive details such as `command`, `profile`, `path`, or `follow_up_issue`
+- optional non-sensitive details such as `command`, `profile`, `path`, `operation`, or
+  `follow_up_issue`
 
 Current error categories:
 
@@ -288,6 +292,34 @@ Current error categories:
 - `server`
 - `confirmation_required`
 - `unsupported_operation`
+
+Process exit statuses are stable at the following level:
+
+- `0`: success
+- `1`: runtime or operation failure, including authentication, validation, network/server, and
+  confirmation failures
+- `2`: command-line parse or usage failure
+
+Use the structured JSON `error.code` and `error.category` fields when automation needs a more
+specific failure reason than the process exit status.
+
+## Mutation safety
+
+Before a built-in namespace, config, release, or raw API mutation, the CLI constructs a redacted
+operation plan from the selected profile/server and the command target. Plans include the fields
+available for that operation, such as app, env, cluster, namespace, config key/count, release IDs,
+or a sanitized raw OpenAPI method and path. Config values, request bodies, query values, tokens, and
+Authorization headers are not included.
+
+In interactive table mode, a mutation without `--yes` writes the plan and a `[y/N]` prompt to
+stderr. Only `y` or `yes` executes the request; `n`, `no`, blank input, or EOF rejects it. In
+non-interactive mode and in JSON mode, mutations require `--yes`; otherwise the CLI returns a
+`confirmation_required` error whose `operation` field contains the redacted plan. Rejection occurs
+before any OpenAPI request is sent.
+
+With `--yes`, table mode still writes the plan before the request. A successful JSON response stays
+one valid JSON document and preserves the existing top-level `status` and `data` fields while adding
+the top-level `operation` plan.
 
 ## OpenAPI behavior
 
@@ -309,8 +341,8 @@ Path and payload mapping follows the current Apollo Portal OpenAPI contract, inc
 - `POST /openapi/v1/envs/{env}/apps/{appId}/clusters/{clusterName}/namespaces/{namespaceName}/releases`
 - `PUT /openapi/v1/envs/{env}/releases/{releaseId}/rollback`
 
-Mutating commands require `--yes`. Without it, the CLI returns `confirmation_required` before
-opening a network connection.
+Mutating command confirmation and operation-plan behavior are described in
+[Mutation safety](#mutation-safety).
 
 ## Binary releases
 

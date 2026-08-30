@@ -793,8 +793,9 @@ fn single_read_commands_redact_broad_config_values() {
 
 #[test]
 fn mutating_commands_require_yes_before_network_call() {
+    let server = TestServer::empty();
     let home = temp_home();
-    write_config(&home, &profile_config("http://127.0.0.1:9"));
+    write_config(&home, &profile_config(&server.url()));
 
     let assert = base_command(&home)
         .env("APOLLO_TOKEN", "consumer-token")
@@ -802,12 +803,98 @@ fn mutating_commands_require_yes_before_network_call() {
             "--output", "json", "config", "set", "--env", "DEV", "--app", "demo", "timeout", "3000",
         ])
         .assert()
-        .failure();
+        .code(1);
 
     assert!(assert.get_output().stdout.is_empty());
     let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf8 stderr");
     let json: Value = serde_json::from_str(&stderr).expect("json stderr");
     assert_eq!(json["error"]["code"], "confirmation_required");
+    assert_eq!(json["error"]["operation"]["operation"], "config.set");
+    assert_eq!(json["error"]["operation"]["profile"], "dev");
+    assert_eq!(json["error"]["operation"]["server"], server.url());
+    assert_eq!(json["error"]["operation"]["target"]["app"], "demo");
+    assert_eq!(json["error"]["operation"]["target"]["env"], "DEV");
+    assert_eq!(json["error"]["operation"]["key"], "timeout");
+    assert_eq!(json["error"]["operation"]["keyCount"], 1);
+    server.assert_no_request();
+}
+
+#[test]
+fn yes_in_table_mode_prints_target_summary_before_mutation() {
+    let server = TestServer::json(r#"{"key":"timeout","value":"3000"}"#);
+    let home = temp_home();
+    write_config(&home, &profile_config(&server.url()));
+
+    let assert = base_command(&home)
+        .env("APOLLO_TOKEN", "consumer-secret")
+        .args([
+            "--yes",
+            "config",
+            "set",
+            "--env",
+            "PROD",
+            "--app",
+            "demo",
+            "db.password",
+            "s3cr3t",
+        ])
+        .assert()
+        .success();
+
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf8 stderr");
+    assert!(stderr.contains("Mutation plan:"));
+    assert!(stderr.contains("Operation: config.set"));
+    assert!(stderr.contains("Target: app=demo env=PROD cluster=default namespace=application"));
+    assert!(stderr.contains("Key: db.password"));
+    assert!(!stderr.contains("s3cr3t"));
+    assert!(!stderr.contains("consumer-secret"));
+
+    let request = server.request();
+    assert!(request.body.contains("s3cr3t"));
+}
+
+#[test]
+fn api_mutation_json_plan_sanitizes_path_query_and_body() {
+    let server = TestServer::empty();
+    let home = temp_home();
+    let path = "/openapi/v1/tokens/consumer-secret/apps?operator=alice&token=consumer-secret";
+
+    let assert = base_command(&home)
+        .env("APOLLO_TOKEN", "consumer-secret")
+        .args([
+            "--server",
+            &server.url(),
+            "--yes",
+            "--output",
+            "json",
+            "api",
+            "post",
+            path,
+            "--body",
+            r#"{"password":"s3cr3t"}"#,
+        ])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let json: Value = serde_json::from_str(&stdout).expect("json stdout");
+    assert_eq!(json["operation"]["operation"], "api.post");
+    assert_eq!(json["operation"]["request"]["method"], "POST");
+    assert_eq!(
+        json["operation"]["request"]["path"],
+        "/openapi/v1/tokens/[REDACTED]/apps"
+    );
+    assert_eq!(
+        json["operation"]["request"]["queryParameters"],
+        serde_json::json!(["operator", "token"])
+    );
+    assert!(!stdout.contains("consumer-secret"));
+    assert!(!stdout.contains("s3cr3t"));
+
+    let request = server.request();
+    assert_eq!(request.method, "POST");
+    assert_eq!(request.path, path);
+    assert!(request.body.contains("s3cr3t"));
 }
 
 #[test]
@@ -815,7 +902,7 @@ fn user_token_config_set_does_not_require_or_send_operator() {
     let server = TestServer::json(r#"{"key":"timeout","value":"3000"}"#);
     let home = temp_home();
 
-    base_command(&home)
+    let assert = base_command(&home)
         .env("APOLLO_TOKEN", "apollo_pat_test_token")
         .args([
             "--server",
@@ -834,6 +921,14 @@ fn user_token_config_set_does_not_require_or_send_operator() {
         ])
         .assert()
         .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let json: Value = serde_json::from_str(&stdout).expect("json stdout");
+    assert_eq!(json["status"], 200);
+    assert_eq!(json["operation"]["operation"], "config.set");
+    assert_eq!(json["operation"]["target"]["namespace"], "application");
+    assert_eq!(json["operation"]["key"], "timeout");
+    assert_eq!(json["data"]["value"], "3000");
 
     let request = server.request();
     assert_eq!(
@@ -1183,7 +1278,7 @@ fn config_item_commands_use_encoded_items_for_path_sensitive_keys() {
         &home,
         &profile_config_with_operator(&delete_server.url(), "apollo-bot"),
     );
-    base_command(&home)
+    let delete_assert = base_command(&home)
         .env("APOLLO_TOKEN", "consumer-token")
         .args([
             "--yes",
@@ -1199,6 +1294,10 @@ fn config_item_commands_use_encoded_items_for_path_sensitive_keys() {
         ])
         .assert()
         .success();
+    let stdout = String::from_utf8(delete_assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let json: Value = serde_json::from_str(&stdout).expect("delete json");
+    assert_eq!(json["operation"]["operation"], "config.delete");
+    assert_eq!(json["operation"]["key"], "logging/level");
     assert_eq!(
         delete_server.request().path,
         "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/application/encodedItems/bG9nZ2luZy9sZXZlbA?operator=apollo-bot"
@@ -1262,7 +1361,7 @@ fn namespace_create_with_yes_sends_namespace_instance_payload() {
         &profile_config_with_operator(&server.url(), "apollo-bot"),
     );
 
-    base_command(&home)
+    let assert = base_command(&home)
         .env("APOLLO_TOKEN", "consumer-token")
         .args([
             "--yes",
@@ -1278,6 +1377,14 @@ fn namespace_create_with_yes_sends_namespace_instance_payload() {
         ])
         .assert()
         .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let json: Value = serde_json::from_str(&stdout).expect("namespace create json");
+    assert_eq!(json["operation"]["operation"], "namespace.create");
+    assert_eq!(json["operation"]["target"]["app"], "demo");
+    assert_eq!(json["operation"]["target"]["namespace"], "settings.json");
+    assert_eq!(json["operation"]["publicNamespace"], false);
+    assert_eq!(json["operation"]["appendNamespacePrefix"], true);
 
     let requests = server.requests(3);
     assert_eq!(requests[0].method, "GET");
@@ -2194,7 +2301,7 @@ fn user_token_release_writes_omit_operator_fields() {
     );
     write_file_credential(&home, "dev", "apollo_pat_stored_token");
 
-    base_command(&home)
+    let create_assert = base_command(&home)
         .args([
             "--yes", "--output", "json", "release", "create", "--env", "DEV", "--app", "demo",
             "--title", "release",
@@ -2202,12 +2309,37 @@ fn user_token_release_writes_omit_operator_fields() {
         .assert()
         .success();
 
-    base_command(&home)
+    let stdout = String::from_utf8(create_assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let json: Value = serde_json::from_str(&stdout).expect("create json");
+    assert_eq!(json["operation"]["operation"], "release.create");
+    assert_eq!(json["operation"]["target"]["app"], "demo");
+    assert_eq!(json["operation"]["target"]["env"], "DEV");
+    assert_eq!(json["operation"]["releaseTitle"], "release");
+    assert_eq!(json["operation"]["emergency"], false);
+
+    let rollback_assert = base_command(&home)
         .args([
-            "--yes", "--output", "json", "release", "rollback", "--env", "DEV", "42",
+            "--yes",
+            "--output",
+            "json",
+            "release",
+            "rollback",
+            "--env",
+            "DEV",
+            "42",
+            "--to-release-id",
+            "40",
         ])
         .assert()
         .success();
+
+    let stdout =
+        String::from_utf8(rollback_assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let json: Value = serde_json::from_str(&stdout).expect("rollback json");
+    assert_eq!(json["operation"]["operation"], "release.rollback");
+    assert_eq!(json["operation"]["target"]["env"], "DEV");
+    assert_eq!(json["operation"]["releaseId"], 42);
+    assert_eq!(json["operation"]["toReleaseId"], 40);
 
     let requests = server.requests(2);
     assert_eq!(requests[0].method, "POST");
@@ -2221,7 +2353,7 @@ fn user_token_release_writes_omit_operator_fields() {
     assert_eq!(requests[1].method, "PUT");
     assert_eq!(
         requests[1].path,
-        "/openapi/v1/envs/DEV/releases/42/rollback"
+        "/openapi/v1/envs/DEV/releases/42/rollback?toReleaseId=40"
     );
 }
 
@@ -2304,7 +2436,7 @@ fn config_apply_with_yes_uses_synchronize_endpoint() {
         &profile_config_with_auth_mode(&server.url(), "user-token"),
     );
 
-    base_command(&home)
+    let assert = base_command(&home)
         .env("APOLLO_TOKEN", "apollo_pat_test_token")
         .args([
             "--yes",
@@ -2321,6 +2453,13 @@ fn config_apply_with_yes_uses_synchronize_endpoint() {
         ])
         .assert()
         .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let json: Value = serde_json::from_str(&stdout).expect("apply json");
+    assert_eq!(json["operation"]["operation"], "config.apply");
+    assert_eq!(json["operation"]["source"]["env"], "DEV");
+    assert_eq!(json["operation"]["target"]["env"], "FAT");
+    assert_eq!(json["operation"]["target"]["namespace"], "application");
 
     let requests = server.requests(2);
     assert_eq!(requests[0].method, "GET");

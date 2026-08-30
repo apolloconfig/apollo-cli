@@ -73,6 +73,8 @@ apollo api post /openapi/v1/apps --body '{"app":{"appId":"sample-app"}}' --yes
 - `--output json|table`
 - `--yes`
 
+`--yes` 表示在不显示交互提示的情况下显式批准一次 OpenAPI 变更请求。它不会跳过目标计划构建、参数校验、脱敏或操作信息输出。
+
 ## 引导式初始化
 
 首次使用时推荐执行 `apollo init`。它会创建 profile，将非敏感 profile 元数据写入 `config.toml`，并且可以通过凭据存储抽象保存 Apollo OpenAPI token。
@@ -242,7 +244,7 @@ apollo --profile dev auth capabilities
 - `code`：稳定错误码
 - `category`：稳定错误分类
 - `message`：人类可读错误信息
-- 可选的非敏感详情，例如 `command`、`profile`、`path` 或 `follow_up_issue`
+- 可选的非敏感详情，例如 `command`、`profile`、`path`、`operation` 或 `follow_up_issue`
 
 当前错误分类：
 
@@ -256,6 +258,22 @@ apollo --profile dev auth capabilities
 - `server`
 - `confirmation_required`
 - `unsupported_operation`
+
+进程退出状态在以下层级保持稳定：
+
+- `0`：成功
+- `1`：运行期或操作失败，包括鉴权、校验、网络/服务端和确认失败
+- `2`：命令行解析或用法错误
+
+当自动化调用方需要比进程退出状态更具体的失败原因时，应使用结构化 JSON 中的 `error.code` 和 `error.category`。
+
+## 变更安全
+
+在执行内置 namespace、config、release 或 raw API 变更前，CLI 会根据选中的 profile/server 和命令目标构建一份脱敏操作计划。计划会按操作类型包含可用字段，例如 app、env、cluster、namespace、配置 key/数量、release ID，或经过净化的 raw OpenAPI method 和 path。计划不会包含配置值、请求 body、query 值、token 或 Authorization header。
+
+在交互式 table 模式中，未传 `--yes` 的变更会把计划和默认拒绝的 `[y/N]` 提示写到 stderr。只有输入 `y` 或 `yes` 才会执行；输入 `n`、`no`、空行或遇到 EOF 都会拒绝。在非交互模式和 JSON 模式中，变更必须显式传入 `--yes`；否则 CLI 返回 `confirmation_required`，其 `operation` 字段包含脱敏计划。拒绝发生在任何 OpenAPI 请求发送之前。
+
+传入 `--yes` 时，table 模式仍会在请求前输出计划。成功的 JSON 输出仍是一个完整 JSON 文档，并保留现有顶层 `status` 和 `data` 字段，同时新增顶层 `operation` 计划。
 
 ## OpenAPI 行为
 
@@ -275,7 +293,7 @@ apollo --profile dev auth capabilities
 - `POST /openapi/v1/envs/{env}/apps/{appId}/clusters/{clusterName}/namespaces/{namespaceName}/releases`
 - `PUT /openapi/v1/envs/{env}/releases/{releaseId}/rollback`
 
-变更类命令要求传 `--yes`。如果没有传，CLI 会在建立网络连接之前返回 `confirmation_required`。
+变更类命令的确认和操作计划行为见[变更安全](#变更安全)。
 
 ## 可执行文件发布
 

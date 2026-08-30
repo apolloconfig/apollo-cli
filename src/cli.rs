@@ -32,7 +32,7 @@ pub struct GlobalOptions {
     #[arg(
         long,
         global = true,
-        help = "Skip confirmation prompts for mutating OpenAPI requests"
+        help = "Approve mutating OpenAPI requests without an interactive prompt"
     )]
     pub yes: bool,
 }

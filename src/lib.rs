@@ -4,6 +4,7 @@ mod config;
 mod credential;
 mod error;
 mod http;
+mod mutation;
 mod output;
 pub mod redaction;
 

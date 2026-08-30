@@ -1,4 +1,5 @@
 use crate::cli::OutputFormat;
+use crate::mutation::MutationPlan;
 use crate::output::{OutputWriter, RenderedOutput, StructuredError};
 
 #[derive(Debug)]
@@ -15,6 +16,7 @@ pub enum CliErrorKind {
     },
     ConfirmationRequired {
         message: String,
+        operation: Option<Box<MutationPlan>>,
     },
     CredentialStoreUnavailable {
         message: String,
@@ -99,6 +101,21 @@ impl CliError {
         Self {
             kind: CliErrorKind::ConfirmationRequired {
                 message: message.to_owned(),
+                operation: None,
+            },
+            format,
+        }
+    }
+
+    pub fn confirmation_required_with_plan(
+        message: &str,
+        operation: MutationPlan,
+        format: OutputFormat,
+    ) -> Self {
+        Self {
+            kind: CliErrorKind::ConfirmationRequired {
+                message: message.to_owned(),
+                operation: Some(Box::new(operation)),
             },
             format,
         }
@@ -189,6 +206,7 @@ impl CliError {
                     code: "parse_error",
                     category: "invalid_input",
                     message: message.clone(),
+                    operation: None,
                     command: None,
                     follow_up_issue: Some(5631),
                     path: None,
@@ -200,6 +218,7 @@ impl CliError {
                     code: "invalid_config",
                     category: "invalid_input",
                     message: format!("Invalid Apollo CLI config at {}: {}", path, message),
+                    operation: None,
                     command: None,
                     follow_up_issue: None,
                     path: Some(path.clone()),
@@ -210,26 +229,30 @@ impl CliError {
                     code: "missing_config_base",
                     category: "invalid_input",
                     message: format!("Cannot resolve Apollo CLI config path: {}", message),
+                    operation: None,
                     command: None,
                     follow_up_issue: None,
                     path: None,
                     profile: None,
                 }),
-            CliErrorKind::ConfirmationRequired { message } => OutputWriter::new(self.format)
-                .render_error(&StructuredError {
+            CliErrorKind::ConfirmationRequired { message, operation } => {
+                OutputWriter::new(self.format).render_error(&StructuredError {
                     code: "confirmation_required",
                     category: "confirmation_required",
                     message: message.clone(),
+                    operation: operation.as_deref().cloned(),
                     command: None,
                     follow_up_issue: Some(5626),
                     path: None,
                     profile: None,
-                }),
+                })
+            }
             CliErrorKind::CredentialStoreUnavailable { message } => OutputWriter::new(self.format)
                 .render_error(&StructuredError {
                     code: "credential_store_unavailable",
                     category: "unsupported_operation",
                     message: message.clone(),
+                    operation: None,
                     command: Some("auth".to_owned()),
                     follow_up_issue: Some(5630),
                     path: None,
@@ -240,6 +263,7 @@ impl CliError {
                     code: "invalid_input",
                     category: "invalid_input",
                     message: message.clone(),
+                    operation: None,
                     command: None,
                     follow_up_issue: None,
                     path: None,
@@ -251,6 +275,7 @@ impl CliError {
                     code: "authentication_failed",
                     category: "authentication_failed",
                     message: message.clone(),
+                    operation: None,
                     command: Some("auth".to_owned()),
                     follow_up_issue: Some(5630),
                     path: None,
@@ -261,6 +286,7 @@ impl CliError {
                     code: "network_error",
                     category: "network",
                     message: format!("OpenAPI request to {} failed: {}", path, message),
+                    operation: None,
                     command: None,
                     follow_up_issue: None,
                     path: Some(path.clone()),
@@ -280,6 +306,7 @@ impl CliError {
                         "OpenAPI request to {} returned HTTP {}: {}",
                         path, status, message
                     ),
+                    operation: None,
                     command: None,
                     follow_up_issue: None,
                     path: Some(path.clone()),
@@ -291,6 +318,7 @@ impl CliError {
                     code: "profile_not_found",
                     category: "not_found",
                     message: format!("Profile '{}' was not found.", profile),
+                    operation: None,
                     command: Some("profile".to_owned()),
                     follow_up_issue: Some(5629),
                     path: None,
@@ -304,6 +332,7 @@ impl CliError {
                         "Profile '{}' already exists. Re-run with --overwrite to replace it.",
                         profile
                     ),
+                    operation: None,
                     command: Some(command.clone()),
                     follow_up_issue: None,
                     path: None,

@@ -1,7 +1,8 @@
 use serde::Serialize;
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::cli::OutputFormat;
+use crate::mutation::MutationPlan;
 use crate::redaction::Redactor;
 
 #[derive(Debug, Eq, PartialEq)]
@@ -48,7 +49,10 @@ impl OutputWriter {
                 }
             }
             OutputFormat::Table => {
-                let mut lines = vec![redactor.redact_text(&error.message)];
+                let mut lines = vec![error.message.clone()];
+                if let Some(operation) = &error.operation {
+                    lines.push(operation.render_table());
+                }
                 if let Some(command) = &error.command {
                     lines.push(format!("Command: {}", command));
                 }
@@ -57,7 +61,7 @@ impl OutputWriter {
                 }
                 RenderedOutput {
                     stream: OutputStream::Stderr,
-                    body: ensure_trailing_newline(lines.join("\n")),
+                    body: ensure_trailing_newline(redactor.redact_text(&lines.join("\n"))),
                 }
             }
         }
@@ -78,6 +82,36 @@ impl OutputWriter {
             OutputFormat::Table => RenderedOutput::stdout(redactor.redact_text(&table_body)),
         }
     }
+
+    pub fn render_mutation_success<T: Serialize>(
+        &self,
+        operation: &MutationPlan,
+        value: &T,
+        table_body: String,
+    ) -> RenderedOutput {
+        if self.format == OutputFormat::Table {
+            return self.render_success(value, table_body);
+        }
+
+        let mut value = serde_json::to_value(value).expect("structured success json serialization");
+        let operation = serde_json::to_value(operation).expect("mutation plan json serialization");
+        match &mut value {
+            Value::Object(fields) => {
+                fields.insert("operation".to_owned(), operation);
+            }
+            value => {
+                *value = json!({
+                    "operation": operation,
+                    "data": value.take(),
+                });
+            }
+        }
+        let value = Redactor.redact_json(value);
+        RenderedOutput::stdout(
+            serde_json::to_string_pretty(&value)
+                .expect("structured mutation success json serialization"),
+        )
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -85,6 +119,8 @@ pub struct StructuredError {
     pub code: &'static str,
     pub category: &'static str,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation: Option<MutationPlan>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
