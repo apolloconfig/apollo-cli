@@ -277,8 +277,7 @@ Structured JSON errors include:
 - `code`: stable error code
 - `category`: stable category
 - `message`: human-readable message
-- optional non-sensitive details such as `command`, `profile`, `path`, `operation`, or
-  `follow_up_issue`
+- optional non-sensitive details such as `command`, `profile`, `path`, or `operation`
 
 Current error categories:
 

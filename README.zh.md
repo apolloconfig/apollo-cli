@@ -244,7 +244,7 @@ apollo --profile dev auth capabilities
 - `code`：稳定错误码
 - `category`：稳定错误分类
 - `message`：人类可读错误信息
-- 可选的非敏感详情，例如 `command`、`profile`、`path`、`operation` 或 `follow_up_issue`
+- 可选的非敏感详情，例如 `command`、`profile`、`path` 或 `operation`
 
 当前错误分类：
 

@@ -208,7 +208,6 @@ impl CliError {
                     message: message.clone(),
                     operation: None,
                     command: None,
-                    follow_up_issue: Some(5631),
                     path: None,
                     profile: None,
                 })
@@ -220,7 +219,6 @@ impl CliError {
                     message: format!("Invalid Apollo CLI config at {}: {}", path, message),
                     operation: None,
                     command: None,
-                    follow_up_issue: None,
                     path: Some(path.clone()),
                     profile: None,
                 }),
@@ -231,7 +229,6 @@ impl CliError {
                     message: format!("Cannot resolve Apollo CLI config path: {}", message),
                     operation: None,
                     command: None,
-                    follow_up_issue: None,
                     path: None,
                     profile: None,
                 }),
@@ -242,7 +239,6 @@ impl CliError {
                     message: message.clone(),
                     operation: operation.as_deref().cloned(),
                     command: None,
-                    follow_up_issue: None,
                     path: None,
                     profile: None,
                 })
@@ -254,7 +250,6 @@ impl CliError {
                     message: message.clone(),
                     operation: None,
                     command: Some("auth".to_owned()),
-                    follow_up_issue: Some(5630),
                     path: None,
                     profile: None,
                 }),
@@ -265,7 +260,6 @@ impl CliError {
                     message: message.clone(),
                     operation: None,
                     command: None,
-                    follow_up_issue: None,
                     path: None,
                     profile: None,
                 })
@@ -277,7 +271,6 @@ impl CliError {
                     message: message.clone(),
                     operation: None,
                     command: Some("auth".to_owned()),
-                    follow_up_issue: Some(5630),
                     path: None,
                     profile: None,
                 }),
@@ -288,7 +281,6 @@ impl CliError {
                     message: format!("OpenAPI request to {} failed: {}", path, message),
                     operation: None,
                     command: None,
-                    follow_up_issue: None,
                     path: Some(path.clone()),
                     profile: None,
                 })
@@ -308,7 +300,6 @@ impl CliError {
                     ),
                     operation: None,
                     command: None,
-                    follow_up_issue: None,
                     path: Some(path.clone()),
                     profile: None,
                 })
@@ -320,7 +311,6 @@ impl CliError {
                     message: format!("Profile '{}' was not found.", profile),
                     operation: None,
                     command: Some("profile".to_owned()),
-                    follow_up_issue: Some(5629),
                     path: None,
                     profile: Some(profile.clone()),
                 }),
@@ -334,7 +324,6 @@ impl CliError {
                     ),
                     operation: None,
                     command: Some(command.clone()),
-                    follow_up_issue: None,
                     path: None,
                     profile: Some(profile.clone()),
                 })

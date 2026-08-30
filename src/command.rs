@@ -3036,7 +3036,6 @@ mod tests {
 
             let rendered = error.render();
             assert!(rendered.body.contains("no changes were made"));
-            assert!(!rendered.body.contains("Follow-up issue"));
             assert!(
                 String::from_utf8(writer)
                     .expect("utf8 output")
@@ -3084,7 +3083,6 @@ mod tests {
             serde_json::from_str(&rendered.body).expect("confirmation json");
         assert_eq!(json["error"]["code"], "confirmation_required");
         assert_eq!(json["error"]["operation"]["operation"], "config.set");
-        assert!(json["error"].get("follow_up_issue").is_none());
         assert!(writer.is_empty());
     }
 

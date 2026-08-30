@@ -56,9 +56,6 @@ impl OutputWriter {
                 if let Some(command) = &error.command {
                     lines.push(format!("Command: {}", command));
                 }
-                if let Some(issue) = error.follow_up_issue {
-                    lines.push(format!("Follow-up issue: #{}", issue));
-                }
                 RenderedOutput {
                     stream: OutputStream::Stderr,
                     body: ensure_trailing_newline(redactor.redact_text(&lines.join("\n"))),
@@ -124,8 +121,6 @@ pub struct StructuredError {
     pub operation: Option<MutationPlan>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub follow_up_issue: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
