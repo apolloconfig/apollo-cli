@@ -255,7 +255,10 @@ fn sanitize_path(path: &str) -> String {
                 redact_next = false;
                 return "[REDACTED]".to_owned();
             }
-            let lowercase = segment.to_ascii_lowercase();
+            let Ok(decoded) = urlencoding::decode(segment) else {
+                return "[REDACTED]".to_owned();
+            };
+            let lowercase = decoded.to_ascii_lowercase();
             let contains_sensitive_marker = lowercase.contains("token")
                 || lowercase.contains("authorization")
                 || lowercase.contains("password")
@@ -365,6 +368,19 @@ mod tests {
         assert!(!inline_secret_json.to_string().contains("abc"));
         assert!(!inline_secret_json.to_string().contains("def"));
         assert!(!inline_secret_json.to_string().contains("value"));
+
+        let encoded_secret_plan = MutationPlan::new("api.post").with_request(
+            "POST",
+            "/openapi/v1/%74%6f%6b%65%6e-secret-abc/%74%6f%6b%65%6e%73/consumer-secret",
+        );
+        let encoded_secret_json =
+            serde_json::to_value(&encoded_secret_plan).expect("encoded-secret plan json");
+        assert_eq!(
+            encoded_secret_json["request"]["path"],
+            "/openapi/v1/[REDACTED]/%74%6f%6b%65%6e%73/[REDACTED]"
+        );
+        assert!(!encoded_secret_json.to_string().contains("secret-abc"));
+        assert!(!encoded_secret_json.to_string().contains("consumer-secret"));
     }
 
     #[test]
