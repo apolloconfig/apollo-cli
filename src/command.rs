@@ -1261,6 +1261,8 @@ fn execute_config(
                 ));
             }
 
+            // Best-effort stale detection only: the current synchronize contract has no target
+            // revision or conditional-write precondition to close the remaining check/write race.
             let path = append_optional_query(
                 format!("{}/items/synchronize", namespace_path(&scope)),
                 "operator",

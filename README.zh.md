@@ -285,6 +285,8 @@ table 和 JSON 输出都会给出源端与目标端 scope，以及 `create`、`u
 
 单独执行的 `config diff` 仅供参考，不会生成可供后续调用消费的计划制品。`config apply` 会自行捕获完整分页的源端快照，用这份快照调用 `items/diff`，同时捕获完整分页的目标端状态，并根据返回的变更集生成详细变更计划。批准后，CLI 会重新读取目标端，并使用同一份已捕获的源端快照再次评估；如果目标端配置状态或评估结果发生变化，命令会返回 `stale_plan`，且不会发送同步请求。首次批准有意发生在这些预检读取之前，第二次详细批准则确认实际变更计数。如果所有变更计数均为零，命令会返回确定性的 `data.result: "no-op"` 成功结果，并且不会调用 `items/synchronize`。
 
+该 stale-plan 检查属于乐观、best-effort 防护。当前 Apollo `items/synchronize` OpenAPI 约定没有目标 revision、ETag 或条件写入前置条件，因此最终检查之后发生的目标端写入仍可能与同步竞争。要彻底消除这个窗口，需要先修改 Apollo OpenAPI contract，再由服务端在更新配置的同一原子操作中校验目标 revision。对写入互斥有严格要求的调用方，在当前 CLI 工作流之外仍需自行协调。
+
 ## OpenAPI 行为
 
 第一版 v0 实现使用一个小型通用 HTTP client，而不是生成式 SDK。这样可以让 CLI 与 Apollo 服务端仓库解耦，同时仍然保证所有内置资源命令都限定在 `/openapi/v1/*`。

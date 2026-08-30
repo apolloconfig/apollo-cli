@@ -350,6 +350,13 @@ occurs before these preflight reads; the detailed approval covers the resulting 
 all counts are zero, the command returns the deterministic `data.result: "no-op"` success response
 without calling `items/synchronize`.
 
+This stale-plan check is optimistic and best-effort. The current Apollo `items/synchronize` OpenAPI
+contract has no target revision, ETag, or conditional-write precondition, so a target write after
+the final check can still race with synchronization. Eliminating that window requires a
+contract-first Apollo OpenAPI and server change that validates the target revision atomically with
+the item update. Callers that require exclusive writes must coordinate them outside the current CLI
+workflow.
+
 ## OpenAPI behavior
 
 The first v0 implementation uses a small generic HTTP client instead of a generated SDK. This keeps
