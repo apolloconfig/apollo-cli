@@ -135,6 +135,10 @@ The CLI stores non-secret profile metadata in `config.toml` under the OS config 
 - Linux: `$XDG_CONFIG_HOME/apollo/config.toml` or `~/.config/apollo/config.toml`
 - Windows: `%APPDATA%\apollo\config.toml`
 
+Set `APOLLO_CLI_HOME` to an absolute directory to place `config.toml` and file-backed credentials
+there instead. This is intended for isolated CI and smoke runs; normal interactive use should keep
+the platform default.
+
 The config file stores:
 
 - `active_profile`
@@ -431,6 +435,13 @@ those checks pass does it create the `v<version>` tag at the exact workflow comm
 notes, verify the complete draft asset set, and publish the Release. Versions containing a SemVer
 prerelease suffix are published as prereleases.
 
+Before starting a release, maintainers must also run **Actions → Apollo mutation smoke → Run
+workflow** on the intended default-branch commit and require a successful result. The workflow is
+also scheduled weekly. It builds a pinned Apollo revision with Portal, ConfigService, AdminService,
+and disposable H2 databases, then exercises the real mutation contract described below. The Apollo
+pin is deliberately stored in `scripts/mutation-smoke.sh`; update it only as a reviewed source
+change.
+
 ## Local development
 
 Build the CLI:
@@ -455,6 +466,26 @@ Run focused OpenAPI command integration tests with the local mock HTTP server:
 
 ```bash
 cargo test --test openapi
+```
+
+Run the repeatable real-Portal mutation smoke from a clean checkout (requires Git, curl, jq, JDK 17,
+and the stable Rust toolchain):
+
+```bash
+./scripts/mutation-smoke.sh
+```
+
+The command fetches the pinned Apollo revision, builds its single-process assembly, starts Portal +
+H2, builds the CLI, creates an isolated `APOLLO_CLI_HOME` profile and disposable app/namespaces, and
+validates config diff/apply, confirmation rejection, permission failure, release creation/listing,
+and rollback against real server state. Target-only keys are verified as preserved under the merge
+contract, and no-op state is compared before and after the command. User tokens and config values
+stay in a mode-`0700` temporary directory, failure diagnostics are dynamically redacted, and the
+directory and assembly process are always removed. To reuse an already checked-out clean Apollo
+tree at the same pinned commit:
+
+```bash
+APOLLO_SMOKE_APOLLO_SOURCE=/absolute/path/to/apollo ./scripts/mutation-smoke.sh
 ```
 
 If you have a local Apollo Portal running, you can also smoke-test against it:
@@ -492,3 +523,4 @@ cargo clippy --all-targets --all-features -- -D warnings
 - `tests/openapi.rs`: integration coverage for OpenAPI paths, auth headers, and confirmation guards
 - `tests/profile.rs`: integration coverage for profile commands and context resolution
 - `tests/redaction.rs`: integration coverage for redaction behavior
+- `scripts/mutation-smoke.sh`: pinned Apollo Portal + H2 mutation smoke and state assertions

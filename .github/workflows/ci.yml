@@ -19,6 +19,8 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+      - name: bash syntax
+        run: bash -n scripts/mutation-smoke.sh
       - name: cargo fmt
         run: cargo fmt --check
       - name: cargo clippy

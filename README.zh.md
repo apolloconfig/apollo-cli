@@ -120,6 +120,9 @@ CLI 将非敏感 profile 元数据存储在操作系统配置目录下的 `confi
 - Linux：`$XDG_CONFIG_HOME/apollo/config.toml` 或 `~/.config/apollo/config.toml`
 - Windows：`%APPDATA%\apollo\config.toml`
 
+如需在隔离的 CI 或 smoke 环境中保存 `config.toml` 和文件型凭据，可将
+`APOLLO_CLI_HOME` 设置为绝对目录。日常交互式使用仍建议保留平台默认路径。
+
 配置文件会存储：
 
 - `active_profile`
@@ -357,6 +360,11 @@ checksum 与构建来源证明。全部检查通过后，才会在本次 workflo
 `v<version>` tag，自动生成 release notes，核对草稿 Release 的完整附件集合并公开发布。版本中含有
 SemVer 预发布后缀时，会发布为 prerelease。
 
+发版前，维护者还必须在目标默认分支 commit 上运行 **Actions → Apollo mutation smoke → Run
+workflow**，并确认执行成功；该 workflow 也会每周定时运行。它使用固定 Apollo revision 构建
+Portal、ConfigService、AdminService 和一次性 H2 数据库，再执行下文所述的真实变更约定。Apollo
+固定 revision 保存在 `scripts/mutation-smoke.sh` 中，更新它必须作为代码变更接受 review。
+
 ## 本地开发
 
 构建 CLI：
@@ -381,6 +389,24 @@ cargo test
 
 ```bash
 cargo test --test openapi
+```
+
+从干净 checkout 运行可重复的真实 Portal 变更 smoke（需要 Git、curl、jq、JDK 17 和稳定版 Rust
+工具链）：
+
+```bash
+./scripts/mutation-smoke.sh
+```
+
+该命令会拉取固定 Apollo revision、构建并启动单进程 Portal + H2 assembly、构建 CLI、创建隔离的
+`APOLLO_CLI_HOME` profile 和一次性 app/namespace，并基于真实服务端状态验证 config diff/apply、
+缺少确认时拒绝、权限失败、release 创建/列表以及回滚。测试会确认保守合并保留目标端独有 key，
+并比较 no-op 前后的完整目标状态。User token 和配置值只保存在权限为 `0700` 的临时目录中，失败
+诊断会动态脱敏，assembly 进程与临时目录始终会被清理。若本地已有同一固定 commit 的干净 Apollo
+checkout，可以复用：
+
+```bash
+APOLLO_SMOKE_APOLLO_SOURCE=/absolute/path/to/apollo ./scripts/mutation-smoke.sh
 ```
 
 如果本地运行了 Apollo Portal，也可以直接对它做 smoke test：
@@ -418,3 +444,4 @@ cargo clippy --all-targets --all-features -- -D warnings
 - `tests/openapi.rs`：OpenAPI path、鉴权 header 和确认保护的集成覆盖
 - `tests/profile.rs`：profile 命令和上下文解析的集成覆盖
 - `tests/redaction.rs`：脱敏行为的集成覆盖
+- `scripts/mutation-smoke.sh`：固定 Apollo Portal + H2 变更 smoke 与状态断言
