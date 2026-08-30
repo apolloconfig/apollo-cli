@@ -6,9 +6,9 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::cli::{
-    ApiArgs, AppCommand, AuthCommand, AuthMode, Cli, Commands, ConfigCommand, EnvCommand, InitArgs,
-    NamespaceCommand, NamespaceScopeArgs, OutputFormat, ProfileCommand, ReleaseCommand,
-    USER_TOKEN_PREFIX,
+    ApiArgs, AppCommand, AuthCommand, AuthMode, Cli, ClusterScopeArgs, Commands, ConfigCommand,
+    EnvCommand, InitArgs, NamespaceCommand, NamespaceScopeArgs, OutputFormat, ProfileCommand,
+    ReleaseCommand, USER_TOKEN_PREFIX,
 };
 use crate::config::{
     CredentialRef, LoadedConfig, ProfileConfig, RuntimeContext, load_config, read_env_output,
@@ -17,8 +17,9 @@ use crate::config::{
 use crate::credential;
 use crate::error::CliError;
 use crate::http::{OpenApiClient, OpenApiResponse, append_query, encode_path_segment};
+use crate::mutation::{MutationPlan, MutationScope};
 use crate::output::{OutputWriter, RenderedOutput};
-use crate::redaction::Sensitive;
+use crate::redaction::{Redactor, Sensitive};
 
 const DEFAULT_PAGE: u32 = 0;
 const DEFAULT_PAGE_SIZE: u32 = 20;
@@ -549,10 +550,29 @@ fn execute_namespace(
     cli: &Cli,
     output: OutputFormat,
 ) -> Result<RenderedOutput, CliError> {
-    if matches!(command, NamespaceCommand::Create { .. }) {
-        require_yes_for_openapi(cli, output)?;
-    }
+    let mutation_plan = match &command {
+        NamespaceCommand::Create {
+            scope,
+            name,
+            public_namespace,
+            append_namespace_prefix,
+            ..
+        } => Some(prepare_mutation(
+            cli,
+            output,
+            namespace_create_mutation_plan(
+                scope,
+                name,
+                *public_namespace,
+                *append_namespace_prefix,
+            ),
+        )?),
+        NamespaceCommand::List { .. } | NamespaceCommand::Get { .. } => None,
+    };
     let openapi = openapi_context(cli, output)?;
+    if let Some(mutation_plan) = mutation_plan.as_ref() {
+        ensure_approved_runtime_context(mutation_plan, &openapi.context)?;
+    }
     match command {
         NamespaceCommand::List { scope } => {
             ensure_consumer_token_scoped_read_supported(&openapi, "namespace list")?;
@@ -587,15 +607,36 @@ fn execute_namespace(
             comment,
             append_namespace_prefix,
         } => {
+            let mutation_plan = mutation_plan.expect("namespace create mutation plan");
             let operator = operator_for_mutation(
                 operator.as_deref(),
                 &openapi.context,
                 openapi.context.output,
             )?;
-            let app_namespace = register_app_namespace(
+            let app_namespace_plan = prepare_app_namespace_registration(
                 &openapi,
                 &scope.app,
                 &name,
+                public_namespace,
+                append_namespace_prefix,
+            )?;
+            let resolved_plan = namespace_create_mutation_plan(
+                &scope,
+                &app_namespace_plan.name,
+                public_namespace,
+                append_namespace_prefix,
+            );
+            let contextualized_resolved_plan =
+                mutation_plan_with_openapi_context(&openapi, resolved_plan.clone())?;
+            let mutation_plan = if contextualized_resolved_plan == mutation_plan.plan {
+                mutation_plan
+            } else {
+                prepare_mutation_with_openapi_context(cli, &openapi, resolved_plan)?
+            };
+            let app_namespace = register_app_namespace(
+                &openapi,
+                &scope.app,
+                app_namespace_plan,
                 public_namespace,
                 comment.as_deref(),
                 append_namespace_prefix,
@@ -619,7 +660,7 @@ fn execute_namespace(
                 "clusterName": &scope.cluster,
                 "appNamespaceName": &app_namespace.name,
             }]);
-            match openapi.request("POST", &path, Some(body)) {
+            match openapi.mutation_request(&mutation_plan.plan, "POST", &path, Some(body)) {
                 Ok(output) => Ok(output),
                 Err(error) if is_namespace_create_reported_failed(&error) => {
                     match openapi
@@ -628,8 +669,9 @@ fn execute_namespace(
                     {
                         Ok(response) => {
                             let data = redact_nested_item_values(response.data.clone());
-                            Ok(render_openapi_response_with_data(
+                            Ok(render_mutation_response_with_data(
                                 &openapi.writer,
+                                &mutation_plan.plan,
                                 &response,
                                 data,
                             ))
@@ -682,15 +724,19 @@ struct RegisteredAppNamespace {
     created: bool,
 }
 
-fn register_app_namespace(
+struct PreparedAppNamespaceRegistration {
+    registration: AppNamespaceRegistration,
+    name: String,
+    should_register: bool,
+}
+
+fn prepare_app_namespace_registration(
     openapi: &OpenApiCommandContext,
     app_id: &str,
     namespace_name: &str,
     public_namespace: bool,
-    comment: Option<&str>,
     append_namespace_prefix: bool,
-    operator: Option<&str>,
-) -> Result<RegisteredAppNamespace, CliError> {
+) -> Result<PreparedAppNamespaceRegistration, CliError> {
     let registration = app_namespace_registration(namespace_name);
     let mut checked_prefixed_public = false;
     match find_app_namespace(openapi, app_id, namespace_name)? {
@@ -701,9 +747,10 @@ fn register_app_namespace(
                     if let Some(existing) =
                         find_prefixed_public_app_namespace(openapi, app_id, &registration)?
                     {
-                        return Ok(RegisteredAppNamespace {
+                        return Ok(PreparedAppNamespaceRegistration {
+                            registration,
                             name: existing.name,
-                            created: false,
+                            should_register: false,
                         });
                     }
                 } else {
@@ -723,16 +770,18 @@ fn register_app_namespace(
                 && append_namespace_prefix
                 && matches!(existing.is_public, Some(false)))
             {
-                return Ok(RegisteredAppNamespace {
+                return Ok(PreparedAppNamespaceRegistration {
+                    registration,
                     name: existing.name,
-                    created: false,
+                    should_register: false,
                 });
             };
         }
         AppNamespaceLookup::UnknownReadDenied => {
-            return Ok(RegisteredAppNamespace {
+            return Ok(PreparedAppNamespaceRegistration {
+                registration,
                 name: namespace_name.to_owned(),
-                created: false,
+                should_register: false,
             });
         }
         AppNamespaceLookup::Missing => {}
@@ -742,8 +791,37 @@ fn register_app_namespace(
         && !checked_prefixed_public
         && let Some(existing) = find_prefixed_public_app_namespace(openapi, app_id, &registration)?
     {
-        return Ok(RegisteredAppNamespace {
+        return Ok(PreparedAppNamespaceRegistration {
+            registration,
             name: existing.name,
+            should_register: false,
+        });
+    }
+
+    let name = if public_namespace && append_namespace_prefix {
+        prefixed_public_app_namespace_name(openapi, app_id, &registration)?
+    } else {
+        app_namespace_registration_name(&registration)
+    };
+    Ok(PreparedAppNamespaceRegistration {
+        registration,
+        name,
+        should_register: true,
+    })
+}
+
+fn register_app_namespace(
+    openapi: &OpenApiCommandContext,
+    app_id: &str,
+    prepared: PreparedAppNamespaceRegistration,
+    public_namespace: bool,
+    comment: Option<&str>,
+    append_namespace_prefix: bool,
+    operator: Option<&str>,
+) -> Result<RegisteredAppNamespace, CliError> {
+    if !prepared.should_register {
+        return Ok(RegisteredAppNamespace {
+            name: prepared.name,
             created: false,
         });
     }
@@ -761,8 +839,8 @@ fn register_app_namespace(
     }
     let mut body = json!({
         "appId": app_id,
-        "name": registration.name,
-        "format": registration.format,
+        "name": prepared.registration.name,
+        "format": prepared.registration.format,
         "isPublic": public_namespace,
         "appendNamespacePrefix": append_namespace_prefix,
     });
@@ -773,15 +851,49 @@ fn register_app_namespace(
         body["dataChangeCreatedBy"] = json!(operator);
     }
     let response = openapi.client.request("POST", &path, Some(body))?;
+    let actual_name = response
+        .data
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or(&prepared.name);
+    if actual_name != prepared.name {
+        return Err(CliError::invalid_input(
+            &format!(
+                "Apollo registered AppNamespace '{actual_name}' instead of approved '{}'; the namespace instance was not created",
+                prepared.name
+            ),
+            openapi.context.output,
+        ));
+    }
     Ok(RegisteredAppNamespace {
-        name: response
-            .data
-            .get("name")
-            .and_then(Value::as_str)
-            .unwrap_or(namespace_name)
-            .to_owned(),
+        name: actual_name.to_owned(),
         created: true,
     })
+}
+
+fn prefixed_public_app_namespace_name(
+    openapi: &OpenApiCommandContext,
+    app_id: &str,
+    registration: &AppNamespaceRegistration,
+) -> Result<String, CliError> {
+    let path = format!("/openapi/v1/apps/{}", encode_path_segment(app_id));
+    let response = openapi.client.request("GET", &path, None)?;
+    let org_id = response
+        .data
+        .get("orgId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|org_id| !org_id.is_empty())
+        .ok_or_else(|| {
+            CliError::invalid_input(
+                "Apollo did not return the app orgId required to preview the prefixed public namespace name",
+                openapi.context.output,
+            )
+        })?;
+    Ok(format!(
+        "{org_id}.{}",
+        app_namespace_registration_name(registration)
+    ))
 }
 
 struct ExistingAppNamespace {
@@ -874,15 +986,19 @@ fn stored_public_app_namespace_matches(
     stored_name: &str,
     registration: &AppNamespaceRegistration,
 ) -> bool {
-    let requested_name = if registration.format == "properties" {
-        registration.name.clone()
-    } else {
-        format!("{}.{}", registration.name, registration.format)
-    };
+    let requested_name = app_namespace_registration_name(registration);
     stored_name == requested_name
         || stored_name
             .split_once('.')
             .is_some_and(|(_, suffix)| suffix == requested_name)
+}
+
+fn app_namespace_registration_name(registration: &AppNamespaceRegistration) -> String {
+    if registration.format == "properties" {
+        registration.name.clone()
+    } else {
+        format!("{}.{}", registration.name, registration.format)
+    }
 }
 
 fn is_missing_app_namespace(error: &CliError) -> bool {
@@ -936,10 +1052,13 @@ fn execute_config(
     cli: &Cli,
     output: OutputFormat,
 ) -> Result<RenderedOutput, CliError> {
-    if config_command_requires_confirmation(&command) {
-        require_yes_for_openapi(cli, output)?;
-    }
+    let mutation_plan = config_mutation_plan(&command)
+        .map(|plan| prepare_mutation(cli, output, plan))
+        .transpose()?;
     let openapi = openapi_context(cli, output)?;
+    if let Some(mutation_plan) = mutation_plan.as_ref() {
+        ensure_approved_runtime_context(mutation_plan, &openapi.context)?;
+    }
     match command {
         ConfigCommand::List { scope, page, size } => {
             ensure_config_item_read_supported(&openapi)?;
@@ -967,6 +1086,10 @@ fn execute_config(
             comment,
             operator,
         } => {
+            let mutation_plan = &mutation_plan
+                .as_ref()
+                .expect("config set mutation plan")
+                .plan;
             let operator = operator_for_mutation(
                 operator.as_deref(),
                 &openapi.context,
@@ -995,10 +1118,18 @@ fn execute_config(
                 .client
                 .request("PUT", &update_path, Some(body.clone()))
             {
-                Ok(response) => Ok(render_openapi_response(&openapi.writer, &response)),
+                Ok(response) => Ok(render_mutation_response(
+                    &openapi.writer,
+                    mutation_plan,
+                    &response,
+                )),
                 Err(error) if error.http_status_code() == Some(404) => {
                     let response = openapi.client.request("POST", &create_path, Some(body))?;
-                    Ok(render_openapi_response(&openapi.writer, &response))
+                    Ok(render_mutation_response(
+                        &openapi.writer,
+                        mutation_plan,
+                        &response,
+                    ))
                 }
                 Err(error) => Err(error),
             }
@@ -1008,6 +1139,10 @@ fn execute_config(
             key,
             operator,
         } => {
+            let mutation_plan = &mutation_plan
+                .as_ref()
+                .expect("config delete mutation plan")
+                .plan;
             let operator = operator_for_mutation(
                 operator.as_deref(),
                 &openapi.context,
@@ -1018,7 +1153,7 @@ fn execute_config(
                 "operator",
                 operator.as_deref(),
             );
-            openapi.request("DELETE", &path, None)
+            openapi.mutation_request(mutation_plan, "DELETE", &path, None)
         }
         ConfigCommand::Diff {
             scope,
@@ -1050,6 +1185,10 @@ fn execute_config(
             target_namespace,
             operator,
         } => {
+            let mutation_plan = &mutation_plan
+                .as_ref()
+                .expect("config apply mutation plan")
+                .plan;
             let operator = operator_for_mutation(
                 operator.as_deref(),
                 &openapi.context,
@@ -1076,7 +1215,7 @@ fn execute_config(
                 "operator",
                 operator.as_deref(),
             );
-            openapi.request("POST", &path, Some(body))
+            openapi.mutation_request(mutation_plan, "POST", &path, Some(body))
         }
     }
 }
@@ -1086,10 +1225,13 @@ fn execute_release(
     cli: &Cli,
     output: OutputFormat,
 ) -> Result<RenderedOutput, CliError> {
-    if release_command_requires_confirmation(&command) {
-        require_yes_for_openapi(cli, output)?;
-    }
+    let mutation_plan = release_mutation_plan(&command)
+        .map(|plan| prepare_mutation(cli, output, plan))
+        .transpose()?;
     let openapi = openapi_context(cli, output)?;
+    if let Some(mutation_plan) = mutation_plan.as_ref() {
+        ensure_approved_runtime_context(mutation_plan, &openapi.context)?;
+    }
     match command {
         ReleaseCommand::List { scope, page, size } => {
             ensure_consumer_token_scoped_read_supported(&openapi, "release list")?;
@@ -1111,6 +1253,10 @@ fn execute_release(
             emergency,
             operator,
         } => {
+            let mutation_plan = mutation_plan
+                .as_ref()
+                .expect("release create mutation plan");
+            let mutation_plan = &mutation_plan.plan;
             let operator = operator_for_mutation(
                 operator.as_deref(),
                 &openapi.context,
@@ -1127,8 +1273,9 @@ fn execute_release(
             }
             let response = openapi.client.request("POST", &path, Some(body))?;
             let data = redact_release_configurations(response.data.clone());
-            Ok(render_openapi_response_with_data(
+            Ok(render_mutation_response_with_data(
                 &openapi.writer,
+                mutation_plan,
                 &response,
                 data,
             ))
@@ -1139,6 +1286,10 @@ fn execute_release(
             to_release_id,
             operator,
         } => {
+            let mutation_plan = mutation_plan
+                .as_ref()
+                .expect("release rollback mutation plan");
+            let mutation_plan = &mutation_plan.plan;
             let operator = operator_for_mutation(
                 operator.as_deref(),
                 &openapi.context,
@@ -1156,23 +1307,31 @@ fn execute_release(
             if let Some(to_release_id) = to_release_id {
                 path = append_query(path, "toReleaseId", &to_release_id.to_string());
             }
-            openapi.request("PUT", &path, None)
+            openapi.mutation_request(mutation_plan, "PUT", &path, None)
         }
     }
 }
 
 fn execute_api(args: ApiArgs, cli: &Cli, output: OutputFormat) -> Result<RenderedOutput, CliError> {
-    if http_method_requires_confirmation(args.method) {
-        require_yes_for_openapi(cli, output)?;
-    }
+    let mutation_plan = api_mutation_plan(&args)
+        .map(|plan| prepare_mutation(cli, output, plan))
+        .transpose()?;
     let openapi = openapi_context(cli, output)?;
+    if let Some(mutation_plan) = mutation_plan.as_ref() {
+        ensure_approved_runtime_context(mutation_plan, &openapi.context)?;
+    }
     let body = match args.body {
         Some(body) => Some(serde_json::from_str::<Value>(&body).map_err(|error| {
             CliError::invalid_input(&error.to_string(), openapi.context.output)
         })?),
         None => None,
     };
-    openapi.request(args.method.as_str(), &args.path, body)
+    match mutation_plan.as_ref() {
+        Some(mutation_plan) => {
+            openapi.mutation_request(&mutation_plan.plan, args.method.as_str(), &args.path, body)
+        }
+        None => openapi.request(args.method.as_str(), &args.path, body),
+    }
 }
 
 fn execute_auth_self_check(
@@ -1298,6 +1457,19 @@ struct OpenApiCommandContext {
     client: OpenApiClient,
 }
 
+struct MutationRuntimeContext {
+    profile: Option<String>,
+    server: String,
+    output: OutputFormat,
+}
+
+struct ApprovedMutation {
+    plan: MutationPlan,
+    profile: Option<String>,
+    server: String,
+    output: OutputFormat,
+}
+
 impl OpenApiCommandContext {
     fn request(
         &self,
@@ -1308,6 +1480,59 @@ impl OpenApiCommandContext {
         let response = self.client.request(method, path, body)?;
         Ok(render_openapi_response(&self.writer, &response))
     }
+
+    fn mutation_request(
+        &self,
+        operation: &MutationPlan,
+        method: &str,
+        path: &str,
+        body: Option<Value>,
+    ) -> Result<RenderedOutput, CliError> {
+        let response = self.client.request(method, path, body)?;
+        Ok(render_mutation_response(&self.writer, operation, &response))
+    }
+}
+
+fn mutation_runtime_context(
+    cli: &Cli,
+    output: OutputFormat,
+) -> Result<MutationRuntimeContext, CliError> {
+    if env_token_is_set()
+        && let Some(server) = explicit_server(cli)
+    {
+        let loaded = load_config(output).ok();
+        let writer_output = loaded
+            .as_ref()
+            .and_then(|loaded| resolve_output(cli, loaded, output).ok())
+            .unwrap_or_else(|| output_from_flags_or_env(cli).unwrap_or(output));
+        let selected_profile = cli
+            .global
+            .profile
+            .clone()
+            .and_then(non_blank)
+            .or_else(|| std::env::var("APOLLO_PROFILE").ok().and_then(non_blank))
+            .or_else(|| {
+                loaded
+                    .as_ref()
+                    .and_then(|loaded| loaded.config.active_profile.clone())
+                    .and_then(non_blank)
+            });
+        return Ok(MutationRuntimeContext {
+            profile: selected_profile,
+            server,
+            output: writer_output,
+        });
+    }
+
+    let loaded = load_config(output)?;
+    let writer_output = resolve_output(cli, &loaded, output)?;
+    let context = resolve_context(cli, &loaded, writer_output)?;
+    let server = required_server(&context, writer_output)?;
+    Ok(MutationRuntimeContext {
+        profile: context.profile,
+        server,
+        output: writer_output,
+    })
 }
 
 fn openapi_context(cli: &Cli, output: OutputFormat) -> Result<OpenApiCommandContext, CliError> {
@@ -1449,6 +1674,19 @@ fn render_openapi_response(writer: &OutputWriter, response: &OpenApiResponse) ->
     writer.render_success(response, response.render_table())
 }
 
+fn render_mutation_response(
+    writer: &OutputWriter,
+    operation: &MutationPlan,
+    response: &OpenApiResponse,
+) -> RenderedOutput {
+    let table_body = if response.data.is_null() {
+        format!("Mutation '{}' completed successfully.", operation.operation)
+    } else {
+        response.render_table()
+    };
+    writer.render_mutation_success(operation, response, table_body)
+}
+
 fn render_openapi_response_with_data(
     writer: &OutputWriter,
     response: &OpenApiResponse,
@@ -1456,6 +1694,16 @@ fn render_openapi_response_with_data(
 ) -> RenderedOutput {
     let response = response.with_data(data);
     render_openapi_response(writer, &response)
+}
+
+fn render_mutation_response_with_data(
+    writer: &OutputWriter,
+    operation: &MutationPlan,
+    response: &OpenApiResponse,
+    data: Value,
+) -> RenderedOutput {
+    let response = response.with_data(data);
+    render_mutation_response(writer, operation, &response)
 }
 
 fn filter_apps_by_ids(data: Value, app_ids: &str) -> Value {
@@ -1655,43 +1903,229 @@ fn redact_release_configurations_in_value(value: &mut Value) {
     }
 }
 
-fn config_command_requires_confirmation(command: &ConfigCommand) -> bool {
-    matches!(
-        command,
-        ConfigCommand::Set { .. } | ConfigCommand::Delete { .. } | ConfigCommand::Apply { .. }
-    )
+fn namespace_create_mutation_plan(
+    scope: &ClusterScopeArgs,
+    name: &str,
+    public_namespace: bool,
+    append_namespace_prefix: bool,
+) -> MutationPlan {
+    MutationPlan::new("namespace.create")
+        .with_target(MutationScope::namespace(
+            &scope.app,
+            &scope.env,
+            &scope.cluster,
+            name,
+        ))
+        .with_namespace_kind(public_namespace, append_namespace_prefix)
 }
 
-fn release_command_requires_confirmation(command: &ReleaseCommand) -> bool {
-    matches!(
-        command,
-        ReleaseCommand::Create { .. } | ReleaseCommand::Rollback { .. }
-    )
+fn config_mutation_plan(command: &ConfigCommand) -> Option<MutationPlan> {
+    match command {
+        ConfigCommand::Set { scope, key, .. } => Some(
+            MutationPlan::new("config.set")
+                .with_target(namespace_mutation_scope(scope))
+                .with_key(key),
+        ),
+        ConfigCommand::Delete { scope, key, .. } => Some(
+            MutationPlan::new("config.delete")
+                .with_target(namespace_mutation_scope(scope))
+                .with_key(key),
+        ),
+        ConfigCommand::Apply {
+            scope,
+            target_env,
+            target_cluster,
+            target_namespace,
+            ..
+        } => Some(
+            MutationPlan::new("config.apply")
+                .with_source(namespace_mutation_scope(scope))
+                .with_target(MutationScope::namespace(
+                    &scope.cluster_scope.app,
+                    target_env,
+                    target_cluster,
+                    target_namespace.as_deref().unwrap_or(&scope.namespace),
+                )),
+        ),
+        ConfigCommand::List { .. } | ConfigCommand::Get { .. } | ConfigCommand::Diff { .. } => None,
+    }
 }
 
-fn http_method_requires_confirmation(method: crate::cli::HttpMethod) -> bool {
+fn release_mutation_plan(command: &ReleaseCommand) -> Option<MutationPlan> {
+    match command {
+        ReleaseCommand::Create {
+            scope,
+            title,
+            emergency,
+            ..
+        } => Some(
+            MutationPlan::new("release.create")
+                .with_target(namespace_mutation_scope(scope))
+                .with_release(title, *emergency),
+        ),
+        ReleaseCommand::Rollback {
+            env,
+            release_id,
+            to_release_id,
+            ..
+        } => Some(
+            MutationPlan::new("release.rollback")
+                .with_target(MutationScope::environment(env))
+                .with_release_ids(*release_id, *to_release_id),
+        ),
+        ReleaseCommand::List { .. } => None,
+    }
+}
+
+fn api_mutation_plan(args: &ApiArgs) -> Option<MutationPlan> {
     matches!(
-        method,
+        args.method,
         crate::cli::HttpMethod::Post
             | crate::cli::HttpMethod::Put
             | crate::cli::HttpMethod::Patch
             | crate::cli::HttpMethod::Delete
     )
+    .then(|| {
+        MutationPlan::new(format!("api.{}", args.method.as_str().to_ascii_lowercase()))
+            .with_request(args.method.as_str(), &args.path)
+    })
 }
 
-fn require_yes_for_openapi(cli: &Cli, output: OutputFormat) -> Result<(), CliError> {
-    require_yes(cli, output_for_confirmation(cli, output))
+fn namespace_mutation_scope(scope: &NamespaceScopeArgs) -> MutationScope {
+    MutationScope::namespace(
+        &scope.cluster_scope.app,
+        &scope.cluster_scope.env,
+        &scope.cluster_scope.cluster,
+        &scope.namespace,
+    )
 }
 
-fn output_for_confirmation(cli: &Cli, output: OutputFormat) -> OutputFormat {
-    if let Some(output) = output_from_flags_or_env(cli) {
-        return output;
+fn prepare_mutation(
+    cli: &Cli,
+    output: OutputFormat,
+    plan: MutationPlan,
+) -> Result<ApprovedMutation, CliError> {
+    let context = mutation_runtime_context(cli, output)?;
+    let plan = plan.with_context(context.profile.clone(), Some(&context.server));
+    confirm_mutation(cli, &plan, context.output)?;
+    Ok(ApprovedMutation {
+        plan,
+        profile: context.profile,
+        server: context.server,
+        output: context.output,
+    })
+}
+
+fn prepare_mutation_with_openapi_context(
+    cli: &Cli,
+    openapi: &OpenApiCommandContext,
+    plan: MutationPlan,
+) -> Result<ApprovedMutation, CliError> {
+    let server = required_server(&openapi.context, openapi.context.output)?;
+    let plan = plan.with_context(openapi.context.profile.clone(), Some(&server));
+    confirm_mutation(cli, &plan, openapi.context.output)?;
+    Ok(ApprovedMutation {
+        plan,
+        profile: openapi.context.profile.clone(),
+        server,
+        output: openapi.context.output,
+    })
+}
+
+fn mutation_plan_with_openapi_context(
+    openapi: &OpenApiCommandContext,
+    plan: MutationPlan,
+) -> Result<MutationPlan, CliError> {
+    let server = required_server(&openapi.context, openapi.context.output)?;
+    Ok(plan.with_context(openapi.context.profile.clone(), Some(&server)))
+}
+
+fn ensure_approved_runtime_context(
+    approved: &ApprovedMutation,
+    context: &RuntimeContext,
+) -> Result<(), CliError> {
+    let server = required_server(context, context.output)?;
+    if approved.profile == context.profile
+        && approved.server == server
+        && approved.output == context.output
+    {
+        return Ok(());
     }
 
-    load_config(output)
-        .ok()
-        .and_then(|loaded| resolve_output(cli, &loaded, output).ok())
-        .unwrap_or(output)
+    Err(CliError::invalid_input(
+        "Apollo runtime context changed after confirmation; no OpenAPI request was sent. Re-run the command to review the current profile and server.",
+        approved.output,
+    ))
+}
+
+fn confirm_mutation(cli: &Cli, plan: &MutationPlan, output: OutputFormat) -> Result<(), CliError> {
+    let interactive = output == OutputFormat::Table && is_interactive_terminal();
+    let stdin = io::stdin();
+    let stderr = io::stderr();
+    confirm_mutation_with_io(
+        cli.global.yes,
+        interactive,
+        plan,
+        output,
+        &mut stdin.lock(),
+        &mut stderr.lock(),
+    )
+}
+
+fn confirm_mutation_with_io<R: BufRead, W: Write>(
+    assume_yes: bool,
+    interactive: bool,
+    plan: &MutationPlan,
+    output: OutputFormat,
+    reader: &mut R,
+    writer: &mut W,
+) -> Result<(), CliError> {
+    if output == OutputFormat::Table && (assume_yes || interactive) {
+        let summary = Redactor.redact_text(&plan.render_table());
+        writeln!(writer, "{summary}")
+            .map_err(|error| CliError::invalid_input(&error.to_string(), output))?;
+    }
+
+    if assume_yes {
+        return Ok(());
+    }
+
+    if !interactive {
+        return Err(CliError::confirmation_required_with_plan(
+            "This command mutates Apollo state. Re-run with --yes in non-interactive or JSON mode.",
+            plan.clone(),
+            output,
+        ));
+    }
+
+    loop {
+        write!(writer, "Proceed with this mutation? [y/N] ")
+            .and_then(|_| writer.flush())
+            .map_err(|error| CliError::invalid_input(&error.to_string(), output))?;
+        let mut line = String::new();
+        let bytes_read = reader
+            .read_line(&mut line)
+            .map_err(|error| CliError::invalid_input(&error.to_string(), output))?;
+        if bytes_read == 0 {
+            return Err(CliError::confirmation_required(
+                "Mutation cancelled because confirmation input ended; no changes were made.",
+                output,
+            ));
+        }
+        match line.trim().to_ascii_lowercase().as_str() {
+            "y" | "yes" => return Ok(()),
+            "" | "n" | "no" => {
+                return Err(CliError::confirmation_required(
+                    "Mutation cancelled; no changes were made.",
+                    output,
+                ));
+            }
+            _ => {
+                writeln!(writer, "Please answer y or n.")
+                    .map_err(|error| CliError::invalid_input(&error.to_string(), output))?;
+            }
+        }
+    }
 }
 
 fn explicit_server(cli: &Cli) -> Option<String> {
@@ -1765,17 +2199,6 @@ fn append_optional_query(path: String, key: &str, value: Option<&str>) -> String
     match value {
         Some(value) => append_query(path, key, value),
         None => path,
-    }
-}
-
-fn require_yes(cli: &Cli, output: OutputFormat) -> Result<(), CliError> {
-    if cli.global.yes {
-        Ok(())
-    } else {
-        Err(CliError::confirmation_required(
-            "This command mutates Apollo state. Re-run with --yes to confirm.",
-            output,
-        ))
     }
 }
 
@@ -2638,6 +3061,19 @@ mod tests {
 
     use crate::cli::OutputFormat;
     use crate::config::{CredentialRef, ProfileConfig};
+    use crate::mutation::{MutationPlan, MutationScope};
+
+    fn mutation_plan() -> MutationPlan {
+        MutationPlan::new("config.set")
+            .with_context(Some("dev".to_owned()), Some("https://apollo.example.com"))
+            .with_target(MutationScope::namespace(
+                "demo",
+                "PROD",
+                "default",
+                "application",
+            ))
+            .with_key("timeout")
+    }
 
     #[test]
     fn read_prompt_line_reports_eof_as_aborted_input() {
@@ -2646,6 +3082,159 @@ mod tests {
             super::read_prompt_line(&mut reader, OutputFormat::Json).expect_err("EOF should fail");
 
         assert_eq!(error.exit_code(), 1);
+    }
+
+    #[test]
+    fn tty_mutation_confirmation_accepts_yes_after_showing_plan() {
+        let mut reader = Cursor::new(b"yes\n".to_vec());
+        let mut writer = Vec::new();
+
+        super::confirm_mutation_with_io(
+            false,
+            true,
+            &mutation_plan(),
+            OutputFormat::Table,
+            &mut reader,
+            &mut writer,
+        )
+        .expect("yes should confirm");
+
+        let output = String::from_utf8(writer).expect("utf8 output");
+        assert!(output.contains("Mutation plan:"));
+        assert!(output.contains("Operation: config.set"));
+        assert!(output.contains("Target: app=demo env=PROD"));
+        assert!(output.contains("Proceed with this mutation? [y/N]"));
+    }
+
+    #[test]
+    fn tty_mutation_confirmation_rejects_no_blank_and_eof() {
+        for input in [b"no\n".as_slice(), b"\n".as_slice(), b"".as_slice()] {
+            let mut reader = Cursor::new(input.to_vec());
+            let mut writer = Vec::new();
+            let error = super::confirm_mutation_with_io(
+                false,
+                true,
+                &mutation_plan(),
+                OutputFormat::Table,
+                &mut reader,
+                &mut writer,
+            )
+            .expect_err("confirmation should be rejected");
+
+            let rendered = error.render();
+            assert!(rendered.body.contains("no changes were made"));
+            assert!(
+                String::from_utf8(writer)
+                    .expect("utf8 output")
+                    .contains("[y/N]")
+            );
+        }
+    }
+
+    #[test]
+    fn tty_mutation_confirmation_reprompts_invalid_input() {
+        let mut reader = Cursor::new(b"maybe\ny\n".to_vec());
+        let mut writer = Vec::new();
+
+        super::confirm_mutation_with_io(
+            false,
+            true,
+            &mutation_plan(),
+            OutputFormat::Table,
+            &mut reader,
+            &mut writer,
+        )
+        .expect("eventual yes should confirm");
+
+        let output = String::from_utf8(writer).expect("utf8 output");
+        assert!(output.contains("Please answer y or n."));
+        assert_eq!(output.matches("Proceed with this mutation?").count(), 2);
+    }
+
+    #[test]
+    fn noninteractive_confirmation_returns_json_plan() {
+        let mut reader = Cursor::new(Vec::<u8>::new());
+        let mut writer = Vec::new();
+        let error = super::confirm_mutation_with_io(
+            false,
+            false,
+            &mutation_plan(),
+            OutputFormat::Json,
+            &mut reader,
+            &mut writer,
+        )
+        .expect_err("non-interactive mutation should require --yes");
+
+        let rendered = error.render();
+        let json: serde_json::Value =
+            serde_json::from_str(&rendered.body).expect("confirmation json");
+        assert_eq!(json["error"]["code"], "confirmation_required");
+        assert_eq!(json["error"]["operation"]["operation"], "config.set");
+        assert!(writer.is_empty());
+    }
+
+    #[test]
+    fn yes_in_table_mode_prints_a_redacted_plan_without_prompting() {
+        let plan = MutationPlan::new("release.create")
+            .with_context(None, Some("https://apollo.example.com"))
+            .with_release("apollo_pat_secret_title", false);
+        let mut reader = Cursor::new(Vec::<u8>::new());
+        let mut writer = Vec::new();
+
+        super::confirm_mutation_with_io(
+            true,
+            false,
+            &plan,
+            OutputFormat::Table,
+            &mut reader,
+            &mut writer,
+        )
+        .expect("--yes should confirm");
+
+        let output = String::from_utf8(writer).expect("utf8 output");
+        assert!(output.contains("Release title: [REDACTED]"));
+        assert!(!output.contains("apollo_pat_secret_title"));
+        assert!(!output.contains("Proceed with this mutation?"));
+    }
+
+    #[test]
+    fn approved_runtime_context_rejects_profile_server_or_output_changes() {
+        let approved = super::ApprovedMutation {
+            plan: mutation_plan(),
+            profile: Some("dev".to_owned()),
+            server: "https://apollo.example.com".to_owned(),
+            output: OutputFormat::Table,
+        };
+        let matching = crate::config::RuntimeContext {
+            profile: Some("dev".to_owned()),
+            server: Some("https://apollo.example.com".to_owned()),
+            output: OutputFormat::Table,
+            auth_mode: crate::cli::AuthMode::ConsumerToken,
+            operator: None,
+            credential: None,
+        };
+        super::ensure_approved_runtime_context(&approved, &matching)
+            .expect("matching runtime context");
+
+        for changed in [
+            crate::config::RuntimeContext {
+                profile: Some("prod".to_owned()),
+                ..matching.clone()
+            },
+            crate::config::RuntimeContext {
+                server: Some("https://other.example.com".to_owned()),
+                ..matching.clone()
+            },
+            crate::config::RuntimeContext {
+                output: OutputFormat::Json,
+                ..matching.clone()
+            },
+        ] {
+            let error = super::ensure_approved_runtime_context(&approved, &changed)
+                .expect_err("changed runtime context should be rejected");
+            assert!(error.render().body.contains("runtime context changed"));
+            assert!(error.render().body.contains("no OpenAPI request was sent"));
+        }
     }
 
     #[test]

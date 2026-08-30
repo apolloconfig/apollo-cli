@@ -41,7 +41,7 @@ fn help_lists_v0_command_groups_and_global_flags() {
         ))
         .stdout(predicate::str::contains("Render output as json or table"))
         .stdout(predicate::str::contains(
-            "Skip confirmation prompts for mutating OpenAPI requests",
+            "Approve mutating OpenAPI requests without an interactive prompt",
         ));
 }
 
@@ -58,7 +58,7 @@ fn openapi_command_without_token_returns_structured_json_error() {
             "list",
         ])
         .assert()
-        .failure();
+        .code(1);
 
     assert!(assert.get_output().stdout.is_empty());
     let output = String::from_utf8(assert.get_output().stderr.clone()).expect("utf8 output");
@@ -82,7 +82,7 @@ fn parse_errors_redact_token_like_arguments_and_honor_json_output() {
             "apollo_pat_secret_token",
         ])
         .assert()
-        .failure();
+        .code(2);
 
     assert!(assert.get_output().stdout.is_empty());
     let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf8 stderr");
