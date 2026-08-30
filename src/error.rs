@@ -18,6 +18,10 @@ pub enum CliErrorKind {
         message: String,
         operation: Option<Box<MutationPlan>>,
     },
+    StalePlan {
+        message: String,
+        operation: Box<MutationPlan>,
+    },
     CredentialStoreUnavailable {
         message: String,
     },
@@ -130,6 +134,16 @@ impl CliError {
         }
     }
 
+    pub fn stale_plan(message: &str, operation: MutationPlan, format: OutputFormat) -> Self {
+        Self {
+            kind: CliErrorKind::StalePlan {
+                message: message.to_owned(),
+                operation: Box::new(operation),
+            },
+            format,
+        }
+    }
+
     pub fn invalid_input(message: &str, format: OutputFormat) -> Self {
         Self {
             kind: CliErrorKind::InvalidInput {
@@ -175,6 +189,7 @@ impl CliError {
             CliErrorKind::InvalidConfig { .. }
             | CliErrorKind::MissingConfigBase { .. }
             | CliErrorKind::ConfirmationRequired { .. }
+            | CliErrorKind::StalePlan { .. }
             | CliErrorKind::CredentialStoreUnavailable { .. }
             | CliErrorKind::InvalidInput { .. }
             | CliErrorKind::AuthenticationRequired { .. }
@@ -243,6 +258,16 @@ impl CliError {
                     profile: None,
                 })
             }
+            CliErrorKind::StalePlan { message, operation } => OutputWriter::new(self.format)
+                .render_error(&StructuredError {
+                    code: "stale_plan",
+                    category: "conflict",
+                    message: message.clone(),
+                    operation: Some(operation.as_ref().clone()),
+                    command: None,
+                    path: None,
+                    profile: None,
+                }),
             CliErrorKind::CredentialStoreUnavailable { message } => OutputWriter::new(self.format)
                 .render_error(&StructuredError {
                     code: "credential_store_unavailable",

@@ -328,9 +328,10 @@ pub enum ConfigCommand {
         #[arg(long, help = "Operator for consumer-token mode")]
         operator: Option<String>,
     },
-    /// Compare a namespace against another target.
+    /// Preview a conservative namespace merge into another target.
     #[command(
-        override_usage = "apollo config diff [OPTIONS] --env <ENV> --app <APP> [--cluster <CLUSTER>] [--namespace <NAMESPACE>] --target-env <TARGET_ENV> [--target-cluster <TARGET_CLUSTER>] [--target-namespace <TARGET_NAMESPACE>]"
+        override_usage = "apollo config diff [OPTIONS] --env <ENV> --app <APP> [--cluster <CLUSTER>] [--namespace <NAMESPACE>] --target-env <TARGET_ENV> [--target-cluster <TARGET_CLUSTER>] [--target-namespace <TARGET_NAMESPACE>]",
+        after_help = "Conservative merge preserves target-only keys. This preview is advisory; config apply captures and verifies its own snapshot."
     )]
     Diff {
         #[command(flatten)]
@@ -342,9 +343,10 @@ pub enum ConfigCommand {
         #[arg(long, help = "Target namespace, defaults to source namespace")]
         target_namespace: Option<String>,
     },
-    /// Sync namespace configuration items to another target.
+    /// Conservatively merge namespace items into another target.
     #[command(
-        override_usage = "apollo config apply [OPTIONS] --env <ENV> --app <APP> [--cluster <CLUSTER>] [--namespace <NAMESPACE>] --target-env <TARGET_ENV> [--target-cluster <TARGET_CLUSTER>] [--target-namespace <TARGET_NAMESPACE>]"
+        override_usage = "apollo config apply [OPTIONS] --env <ENV> --app <APP> [--cluster <CLUSTER>] [--namespace <NAMESPACE>] --target-env <TARGET_ENV> [--target-cluster <TARGET_CLUSTER>] [--target-namespace <TARGET_NAMESPACE>]",
+        after_help = "Creates and updates source keys, preserves target-only keys, and sends no mutation when the assessed change set is empty. Deletion requires a separate explicit config delete."
     )]
     Apply {
         #[command(flatten)]

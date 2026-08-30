@@ -326,6 +326,37 @@ With `--yes`, table mode still writes the plan before the request. A successful 
 one valid JSON document and preserves the existing top-level `status` and `data` fields while adding
 the top-level `operation` plan.
 
+### Config synchronization contract
+
+`config diff` and `config apply` use a conservative merge contract. Source-only keys are created,
+keys whose source value or comment differs are updated, matching keys are unchanged, and target-only
+keys are preserved. An empty source is therefore a successful no-op, not a request to empty the
+target. The CLI does not currently provide `--prune`; deletion requires a separate explicit config
+deletion workflow. If a Portal version reports delete operations from the synchronize diff endpoint,
+the CLI rejects the plan and does not call `items/synchronize`.
+
+Both table and JSON output report the source and target scopes plus `create`, `update`, `delete`, and
+`unchanged` counts. The JSON contract also reports `strategy: "merge"` and
+`targetOnlyBehavior: "preserve"`. It never includes config values in the diff result, apply plan, or
+apply result.
+
+A standalone `config diff` is advisory; it does not create a plan artifact for a later invocation.
+`config apply` captures its own fully paginated source snapshot, assesses that exact snapshot through
+`items/diff`, captures the fully paginated target state, and builds the detailed mutation plan from
+the returned change set. After approval, it reads the target again and repeats the assessment with
+the same captured source snapshot. If either the target item state or assessment changed, the
+command returns `stale_plan` and sends no synchronize request. The initial approval intentionally
+occurs before these preflight reads; the detailed approval covers the resulting change counts. If
+all counts are zero, the command returns the deterministic `data.result: "no-op"` success response
+without calling `items/synchronize`.
+
+This stale-plan check is optimistic and best-effort. The current Apollo `items/synchronize` OpenAPI
+contract has no target revision, ETag, or conditional-write precondition, so a target write after
+the final check can still race with synchronization. Eliminating that window requires a
+contract-first Apollo OpenAPI and server change that validates the target revision atomically with
+the item update. Callers that require exclusive writes must coordinate them outside the current CLI
+workflow.
+
 ## OpenAPI behavior
 
 The first v0 implementation uses a small generic HTTP client instead of a generated SDK. This keeps

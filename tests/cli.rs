@@ -255,6 +255,27 @@ fn config_and_release_group_help_mentions_namespace_scope_options() {
 }
 
 #[test]
+fn config_sync_help_documents_conservative_merge_behavior() {
+    Command::cargo_bin("apollo")
+        .expect("apollo binary")
+        .args(["config", "diff", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Conservative merge preserves target-only keys",
+        ))
+        .stdout(predicate::str::contains("preview is advisory"));
+
+    Command::cargo_bin("apollo")
+        .expect("apollo binary")
+        .args(["config", "apply", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("preserves target-only keys"))
+        .stdout(predicate::str::contains("separate explicit config delete"));
+}
+
+#[test]
 fn payload_option_help_lists_namespace_and_config_fields() {
     Command::cargo_bin("apollo")
         .expect("apollo binary")
