@@ -1118,17 +1118,19 @@ fn execute_config(
                 .client
                 .request("PUT", &update_path, Some(body.clone()))
             {
-                Ok(response) => Ok(render_mutation_response(
+                Ok(response) => Ok(render_mutation_response_with_data(
                     &openapi.writer,
                     mutation_plan,
                     &response,
+                    redact_config_item_values(response.data.clone()),
                 )),
                 Err(error) if error.http_status_code() == Some(404) => {
                     let response = openapi.client.request("POST", &create_path, Some(body))?;
-                    Ok(render_mutation_response(
+                    Ok(render_mutation_response_with_data(
                         &openapi.writer,
                         mutation_plan,
                         &response,
+                        redact_config_item_values(response.data.clone()),
                     ))
                 }
                 Err(error) => Err(error),

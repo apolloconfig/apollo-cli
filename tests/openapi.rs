@@ -992,7 +992,8 @@ fn user_token_config_set_does_not_require_or_send_operator() {
     assert_eq!(json["operation"]["operation"], "config.set");
     assert_eq!(json["operation"]["target"]["namespace"], "application");
     assert_eq!(json["operation"]["key"], "timeout");
-    assert_eq!(json["data"]["value"], "3000");
+    assert_eq!(json["data"]["value"], "[REDACTED]");
+    assert!(!stdout.contains("3000"));
 
     let request = server.request();
     assert_eq!(
@@ -1384,15 +1385,19 @@ fn config_set_falls_back_to_create_when_update_reports_missing_item() {
         &profile_config_with_operator(&server.url(), "apollo-bot"),
     );
 
-    base_command(&home)
+    let assert = base_command(&home)
         .env("APOLLO_TOKEN", "consumer-token")
         .args([
             "--yes", "--output", "json", "config", "set", "--env", "DEV", "--app", "demo",
             "timeout", "3000",
         ])
         .assert()
-        .success()
-        .stdout(predicate::str::contains(r#""key": "timeout""#));
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let json: Value = serde_json::from_str(&stdout).expect("json stdout");
+    assert_eq!(json["data"]["key"], "timeout");
+    assert_eq!(json["data"]["value"], "[REDACTED]");
+    assert!(!stdout.contains("3000"));
 
     let requests = server.requests(2);
     assert_eq!(requests[0].method, "PUT");

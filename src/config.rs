@@ -165,6 +165,18 @@ fn config_path_for_platform(
     platform: Platform,
     vars: &HashMap<String, OsString>,
 ) -> Result<PathBuf, String> {
+    if let Some(cli_home) = vars
+        .get("APOLLO_CLI_HOME")
+        .filter(|value| !value.is_empty())
+        .cloned()
+        .map(PathBuf::from)
+    {
+        if !cli_home.is_absolute() {
+            return Err("APOLLO_CLI_HOME must be an absolute path".to_owned());
+        }
+        return Ok(cli_home.join("config.toml"));
+    }
+
     let home = || {
         vars.get("HOME")
             .filter(|value| !value.is_empty())
@@ -289,6 +301,37 @@ mod tests {
         assert_eq!(
             path,
             PathBuf::from("/Users/tester/Library/Application Support/apollo/config.toml")
+        );
+    }
+
+    #[test]
+    fn apollo_cli_home_overrides_platform_config_path() {
+        let vars = HashMap::from([
+            (String::from("HOME"), OsString::from("/Users/tester")),
+            (
+                String::from("APOLLO_CLI_HOME"),
+                OsString::from("/tmp/apollo-cli-smoke"),
+            ),
+        ]);
+
+        for platform in [Platform::MacOs, Platform::Linux, Platform::Windows] {
+            assert_eq!(
+                config_path_for_platform(platform, &vars).unwrap(),
+                PathBuf::from("/tmp/apollo-cli-smoke/config.toml")
+            );
+        }
+    }
+
+    #[test]
+    fn apollo_cli_home_must_be_absolute() {
+        let vars = HashMap::from([(
+            String::from("APOLLO_CLI_HOME"),
+            OsString::from("relative/apollo-cli"),
+        )]);
+
+        assert_eq!(
+            config_path_for_platform(Platform::Linux, &vars).unwrap_err(),
+            "APOLLO_CLI_HOME must be an absolute path"
         );
     }
 
