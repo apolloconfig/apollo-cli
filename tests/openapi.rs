@@ -854,6 +854,33 @@ fn yes_in_table_mode_prints_target_summary_before_mutation() {
 }
 
 #[test]
+fn table_mutation_with_empty_response_prints_success_message() {
+    let server = TestServer::new(200, "application/json", "");
+    let home = temp_home();
+    write_config(&home, &profile_config(&server.url()));
+
+    let assert = base_command(&home)
+        .env("APOLLO_TOKEN", "consumer-token")
+        .args([
+            "--yes",
+            "config",
+            "set",
+            "--env",
+            "LOCAL",
+            "--app",
+            "demo",
+            "feature.demo",
+            "try-it",
+        ])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    assert_eq!(stdout, "Mutation 'config.set' completed successfully.\n");
+    assert!(!stdout.contains("null"));
+}
+
+#[test]
 fn api_mutation_json_plan_sanitizes_path_query_and_body() {
     let server = TestServer::empty();
     let home = temp_home();
@@ -1933,6 +1960,7 @@ fn namespace_create_allows_prefixed_public_when_only_unprefixed_private_exists()
             r#"{"name":"application.yml","isPublic":false}"#,
         ),
         (200, "application/json", r#"[]"#),
+        (200, "application/json", r#"{"orgId":"FX"}"#),
         (200, "application/json", r#"{"name":"FX.application.yml"}"#),
         (200, "application/json", "{}"),
     ]);
@@ -1942,7 +1970,7 @@ fn namespace_create_allows_prefixed_public_when_only_unprefixed_private_exists()
         &profile_config_with_operator(&server.url(), "apollo-bot"),
     );
 
-    base_command(&home)
+    let assert = base_command(&home)
         .env("APOLLO_TOKEN", "consumer-token")
         .args([
             "--yes",
@@ -1960,23 +1988,32 @@ fn namespace_create_allows_prefixed_public_when_only_unprefixed_private_exists()
         .assert()
         .success();
 
-    let requests = server.requests(4);
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let json: Value = serde_json::from_str(&stdout).expect("namespace create json");
+    assert_eq!(
+        json["operation"]["target"]["namespace"],
+        "FX.application.yml"
+    );
+
+    let requests = server.requests(5);
     assert_eq!(
         requests[0].path,
         "/openapi/v1/apps/demo/appnamespaces/application.yml"
     );
     assert_eq!(requests[1].path, "/openapi/v1/apps/demo/appnamespaces");
-    assert_eq!(requests[2].method, "POST");
-    assert_eq!(
-        requests[2].path,
-        "/openapi/v1/apps/demo/appnamespaces?appendNamespacePrefix=true"
-    );
+    assert_eq!(requests[2].method, "GET");
+    assert_eq!(requests[2].path, "/openapi/v1/apps/demo");
     assert_eq!(requests[3].method, "POST");
     assert_eq!(
         requests[3].path,
+        "/openapi/v1/apps/demo/appnamespaces?appendNamespacePrefix=true"
+    );
+    assert_eq!(requests[4].method, "POST");
+    assert_eq!(
+        requests[4].path,
         "/openapi/v1/namespaces?operator=apollo-bot"
     );
-    let namespace_body: Value = serde_json::from_str(&requests[3].body).expect("json body");
+    let namespace_body: Value = serde_json::from_str(&requests[4].body).expect("json body");
     assert_eq!(namespace_body[0]["appNamespaceName"], "FX.application.yml");
 }
 
@@ -1989,6 +2026,7 @@ fn namespace_create_does_not_reuse_suffix_colliding_public_appnamespace() {
             "application/json",
             r#"[{"name":"FX.foo.application.yml","isPublic":true}]"#,
         ),
+        (200, "application/json", r#"{"orgId":"FX"}"#),
         (200, "application/json", r#"{"name":"FX.application.yml"}"#),
         (200, "application/json", "{}"),
     ]);
@@ -2016,14 +2054,65 @@ fn namespace_create_does_not_reuse_suffix_colliding_public_appnamespace() {
         .assert()
         .success();
 
-    let requests = server.requests(4);
-    assert_eq!(requests[2].method, "POST");
+    let requests = server.requests(5);
+    assert_eq!(requests[2].method, "GET");
+    assert_eq!(requests[2].path, "/openapi/v1/apps/demo");
+    assert_eq!(requests[3].method, "POST");
     assert_eq!(
-        requests[2].path,
+        requests[3].path,
         "/openapi/v1/apps/demo/appnamespaces?appendNamespacePrefix=true"
     );
-    let namespace_body: Value = serde_json::from_str(&requests[3].body).expect("json body");
+    let namespace_body: Value = serde_json::from_str(&requests[4].body).expect("json body");
     assert_eq!(namespace_body[0]["appNamespaceName"], "FX.application.yml");
+}
+
+#[test]
+fn namespace_create_stops_if_apollo_returns_an_unapproved_prefixed_name() {
+    let server = TestServer::sequence(vec![
+        (404, "application/json", r#"{"message":"not found"}"#),
+        (200, "application/json", r#"[]"#),
+        (200, "application/json", r#"{"orgId":"FX"}"#),
+        (
+            200,
+            "application/json",
+            r#"{"name":"OTHER.application.yml"}"#,
+        ),
+    ]);
+    let home = temp_home();
+    write_config(
+        &home,
+        &profile_config_with_operator(&server.url(), "apollo-bot"),
+    );
+
+    let assert = base_command(&home)
+        .env("APOLLO_TOKEN", "consumer-token")
+        .args([
+            "--yes",
+            "--output",
+            "json",
+            "namespace",
+            "create",
+            "--env",
+            "DEV",
+            "--app",
+            "demo",
+            "--public",
+            "application.yml",
+        ])
+        .assert()
+        .code(1);
+
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf8 stderr");
+    assert!(stderr.contains("OTHER.application.yml"));
+    assert!(stderr.contains("FX.application.yml"));
+    assert!(stderr.contains("namespace instance was not created"));
+
+    let requests = server.requests(4);
+    assert_eq!(requests[3].method, "POST");
+    assert_eq!(
+        requests[3].path,
+        "/openapi/v1/apps/demo/appnamespaces?appendNamespacePrefix=true"
+    );
 }
 
 #[test]

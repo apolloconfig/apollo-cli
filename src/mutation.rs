@@ -256,11 +256,34 @@ fn sanitize_path(path: &str) -> String {
                 return "[REDACTED]".to_owned();
             }
             let lowercase = segment.to_ascii_lowercase();
-            redact_next = lowercase.contains("token")
+            let contains_sensitive_marker = lowercase.contains("token")
                 || lowercase.contains("authorization")
                 || lowercase.contains("password")
                 || lowercase.contains("secret");
-            segment.to_owned()
+            if !contains_sensitive_marker {
+                return segment.to_owned();
+            }
+
+            let is_route_marker = matches!(
+                lowercase.as_str(),
+                "token"
+                    | "tokens"
+                    | "authorization"
+                    | "authorizations"
+                    | "password"
+                    | "passwords"
+                    | "secret"
+                    | "secrets"
+                    | "user-tokens"
+                    | "consumer-tokens"
+                    | "consumers"
+            );
+            if is_route_marker {
+                redact_next = true;
+                segment.to_owned()
+            } else {
+                "[REDACTED]".to_owned()
+            }
         })
         .collect::<Vec<_>>()
         .join("/")
@@ -328,6 +351,20 @@ mod tests {
         assert_eq!(json["request"]["queryParameters"][0], "operator");
         assert_eq!(json["request"]["queryParameters"][1], "token");
         assert!(!json.to_string().contains("consumer-secret"));
+
+        let inline_secret_plan = MutationPlan::new("api.post").with_request(
+            "POST",
+            "/openapi/v1/reset-token-abc/clientSecret=def/password-value",
+        );
+        let inline_secret_json =
+            serde_json::to_value(&inline_secret_plan).expect("inline-secret plan json");
+        assert_eq!(
+            inline_secret_json["request"]["path"],
+            "/openapi/v1/[REDACTED]/[REDACTED]/[REDACTED]"
+        );
+        assert!(!inline_secret_json.to_string().contains("abc"));
+        assert!(!inline_secret_json.to_string().contains("def"));
+        assert!(!inline_secret_json.to_string().contains("value"));
     }
 
     #[test]

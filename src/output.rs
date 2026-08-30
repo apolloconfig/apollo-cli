@@ -106,7 +106,8 @@ impl OutputWriter {
                 });
             }
         }
-        let value = Redactor.redact_json(value);
+        let redactor = Redactor;
+        let value = redactor.redact_json(value);
         RenderedOutput::stdout(
             serde_json::to_string_pretty(&value)
                 .expect("structured mutation success json serialization"),

@@ -242,7 +242,7 @@ impl CliError {
                     message: message.clone(),
                     operation: operation.as_deref().cloned(),
                     command: None,
-                    follow_up_issue: Some(5626),
+                    follow_up_issue: None,
                     path: None,
                     profile: None,
                 })

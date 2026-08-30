@@ -6,9 +6,9 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::cli::{
-    ApiArgs, AppCommand, AuthCommand, AuthMode, Cli, Commands, ConfigCommand, EnvCommand, InitArgs,
-    NamespaceCommand, NamespaceScopeArgs, OutputFormat, ProfileCommand, ReleaseCommand,
-    USER_TOKEN_PREFIX,
+    ApiArgs, AppCommand, AuthCommand, AuthMode, Cli, ClusterScopeArgs, Commands, ConfigCommand,
+    EnvCommand, InitArgs, NamespaceCommand, NamespaceScopeArgs, OutputFormat, ProfileCommand,
+    ReleaseCommand, USER_TOKEN_PREFIX,
 };
 use crate::config::{
     CredentialRef, LoadedConfig, ProfileConfig, RuntimeContext, load_config, read_env_output,
@@ -550,9 +550,6 @@ fn execute_namespace(
     cli: &Cli,
     output: OutputFormat,
 ) -> Result<RenderedOutput, CliError> {
-    let mutation_plan = namespace_mutation_plan(&command)
-        .map(|plan| prepare_mutation(cli, output, plan))
-        .transpose()?;
     let openapi = openapi_context(cli, output)?;
     match command {
         NamespaceCommand::List { scope } => {
@@ -588,18 +585,32 @@ fn execute_namespace(
             comment,
             append_namespace_prefix,
         } => {
-            let mutation_plan = mutation_plan
-                .as_ref()
-                .expect("namespace create mutation plan");
             let operator = operator_for_mutation(
                 operator.as_deref(),
                 &openapi.context,
                 openapi.context.output,
             )?;
-            let app_namespace = register_app_namespace(
+            let app_namespace_plan = prepare_app_namespace_registration(
                 &openapi,
                 &scope.app,
                 &name,
+                public_namespace,
+                append_namespace_prefix,
+            )?;
+            let mutation_plan = prepare_mutation_with_openapi_context(
+                cli,
+                &openapi,
+                namespace_create_mutation_plan(
+                    &scope,
+                    &app_namespace_plan.name,
+                    public_namespace,
+                    append_namespace_prefix,
+                ),
+            )?;
+            let app_namespace = register_app_namespace(
+                &openapi,
+                &scope.app,
+                app_namespace_plan,
                 public_namespace,
                 comment.as_deref(),
                 append_namespace_prefix,
@@ -623,7 +634,7 @@ fn execute_namespace(
                 "clusterName": &scope.cluster,
                 "appNamespaceName": &app_namespace.name,
             }]);
-            match openapi.mutation_request(mutation_plan, "POST", &path, Some(body)) {
+            match openapi.mutation_request(&mutation_plan, "POST", &path, Some(body)) {
                 Ok(output) => Ok(output),
                 Err(error) if is_namespace_create_reported_failed(&error) => {
                     match openapi
@@ -634,7 +645,7 @@ fn execute_namespace(
                             let data = redact_nested_item_values(response.data.clone());
                             Ok(render_mutation_response_with_data(
                                 &openapi.writer,
-                                mutation_plan,
+                                &mutation_plan,
                                 &response,
                                 data,
                             ))
@@ -687,15 +698,19 @@ struct RegisteredAppNamespace {
     created: bool,
 }
 
-fn register_app_namespace(
+struct PreparedAppNamespaceRegistration {
+    registration: AppNamespaceRegistration,
+    name: String,
+    should_register: bool,
+}
+
+fn prepare_app_namespace_registration(
     openapi: &OpenApiCommandContext,
     app_id: &str,
     namespace_name: &str,
     public_namespace: bool,
-    comment: Option<&str>,
     append_namespace_prefix: bool,
-    operator: Option<&str>,
-) -> Result<RegisteredAppNamespace, CliError> {
+) -> Result<PreparedAppNamespaceRegistration, CliError> {
     let registration = app_namespace_registration(namespace_name);
     let mut checked_prefixed_public = false;
     match find_app_namespace(openapi, app_id, namespace_name)? {
@@ -706,9 +721,10 @@ fn register_app_namespace(
                     if let Some(existing) =
                         find_prefixed_public_app_namespace(openapi, app_id, &registration)?
                     {
-                        return Ok(RegisteredAppNamespace {
+                        return Ok(PreparedAppNamespaceRegistration {
+                            registration,
                             name: existing.name,
-                            created: false,
+                            should_register: false,
                         });
                     }
                 } else {
@@ -728,16 +744,18 @@ fn register_app_namespace(
                 && append_namespace_prefix
                 && matches!(existing.is_public, Some(false)))
             {
-                return Ok(RegisteredAppNamespace {
+                return Ok(PreparedAppNamespaceRegistration {
+                    registration,
                     name: existing.name,
-                    created: false,
+                    should_register: false,
                 });
             };
         }
         AppNamespaceLookup::UnknownReadDenied => {
-            return Ok(RegisteredAppNamespace {
+            return Ok(PreparedAppNamespaceRegistration {
+                registration,
                 name: namespace_name.to_owned(),
-                created: false,
+                should_register: false,
             });
         }
         AppNamespaceLookup::Missing => {}
@@ -747,8 +765,37 @@ fn register_app_namespace(
         && !checked_prefixed_public
         && let Some(existing) = find_prefixed_public_app_namespace(openapi, app_id, &registration)?
     {
-        return Ok(RegisteredAppNamespace {
+        return Ok(PreparedAppNamespaceRegistration {
+            registration,
             name: existing.name,
+            should_register: false,
+        });
+    }
+
+    let name = if public_namespace && append_namespace_prefix {
+        prefixed_public_app_namespace_name(openapi, app_id, &registration)?
+    } else {
+        app_namespace_registration_name(&registration)
+    };
+    Ok(PreparedAppNamespaceRegistration {
+        registration,
+        name,
+        should_register: true,
+    })
+}
+
+fn register_app_namespace(
+    openapi: &OpenApiCommandContext,
+    app_id: &str,
+    prepared: PreparedAppNamespaceRegistration,
+    public_namespace: bool,
+    comment: Option<&str>,
+    append_namespace_prefix: bool,
+    operator: Option<&str>,
+) -> Result<RegisteredAppNamespace, CliError> {
+    if !prepared.should_register {
+        return Ok(RegisteredAppNamespace {
+            name: prepared.name,
             created: false,
         });
     }
@@ -766,8 +813,8 @@ fn register_app_namespace(
     }
     let mut body = json!({
         "appId": app_id,
-        "name": registration.name,
-        "format": registration.format,
+        "name": prepared.registration.name,
+        "format": prepared.registration.format,
         "isPublic": public_namespace,
         "appendNamespacePrefix": append_namespace_prefix,
     });
@@ -778,15 +825,49 @@ fn register_app_namespace(
         body["dataChangeCreatedBy"] = json!(operator);
     }
     let response = openapi.client.request("POST", &path, Some(body))?;
+    let actual_name = response
+        .data
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or(&prepared.name);
+    if actual_name != prepared.name {
+        return Err(CliError::invalid_input(
+            &format!(
+                "Apollo registered AppNamespace '{actual_name}' instead of approved '{}'; the namespace instance was not created",
+                prepared.name
+            ),
+            openapi.context.output,
+        ));
+    }
     Ok(RegisteredAppNamespace {
-        name: response
-            .data
-            .get("name")
-            .and_then(Value::as_str)
-            .unwrap_or(namespace_name)
-            .to_owned(),
+        name: actual_name.to_owned(),
         created: true,
     })
+}
+
+fn prefixed_public_app_namespace_name(
+    openapi: &OpenApiCommandContext,
+    app_id: &str,
+    registration: &AppNamespaceRegistration,
+) -> Result<String, CliError> {
+    let path = format!("/openapi/v1/apps/{}", encode_path_segment(app_id));
+    let response = openapi.client.request("GET", &path, None)?;
+    let org_id = response
+        .data
+        .get("orgId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|org_id| !org_id.is_empty())
+        .ok_or_else(|| {
+            CliError::invalid_input(
+                "Apollo did not return the app orgId required to preview the prefixed public namespace name",
+                openapi.context.output,
+            )
+        })?;
+    Ok(format!(
+        "{org_id}.{}",
+        app_namespace_registration_name(registration)
+    ))
 }
 
 struct ExistingAppNamespace {
@@ -879,15 +960,19 @@ fn stored_public_app_namespace_matches(
     stored_name: &str,
     registration: &AppNamespaceRegistration,
 ) -> bool {
-    let requested_name = if registration.format == "properties" {
-        registration.name.clone()
-    } else {
-        format!("{}.{}", registration.name, registration.format)
-    };
+    let requested_name = app_namespace_registration_name(registration);
     stored_name == requested_name
         || stored_name
             .split_once('.')
             .is_some_and(|(_, suffix)| suffix == requested_name)
+}
+
+fn app_namespace_registration_name(registration: &AppNamespaceRegistration) -> String {
+    if registration.format == "properties" {
+        registration.name.clone()
+    } else {
+        format!("{}.{}", registration.name, registration.format)
+    }
 }
 
 fn is_missing_app_namespace(error: &CliError) -> bool {
@@ -1541,7 +1626,12 @@ fn render_mutation_response(
     operation: &MutationPlan,
     response: &OpenApiResponse,
 ) -> RenderedOutput {
-    writer.render_mutation_success(operation, response, response.render_table())
+    let table_body = if response.data.is_null() {
+        format!("Mutation '{}' completed successfully.", operation.operation)
+    } else {
+        response.render_table()
+    };
+    writer.render_mutation_success(operation, response, table_body)
 }
 
 fn render_openapi_response_with_data(
@@ -1760,26 +1850,20 @@ fn redact_release_configurations_in_value(value: &mut Value) {
     }
 }
 
-fn namespace_mutation_plan(command: &NamespaceCommand) -> Option<MutationPlan> {
-    match command {
-        NamespaceCommand::Create {
-            scope,
+fn namespace_create_mutation_plan(
+    scope: &ClusterScopeArgs,
+    name: &str,
+    public_namespace: bool,
+    append_namespace_prefix: bool,
+) -> MutationPlan {
+    MutationPlan::new("namespace.create")
+        .with_target(MutationScope::namespace(
+            &scope.app,
+            &scope.env,
+            &scope.cluster,
             name,
-            public_namespace,
-            append_namespace_prefix,
-            ..
-        } => Some(
-            MutationPlan::new("namespace.create")
-                .with_target(MutationScope::namespace(
-                    &scope.app,
-                    &scope.env,
-                    &scope.cluster,
-                    name,
-                ))
-                .with_namespace_kind(*public_namespace, *append_namespace_prefix),
-        ),
-        NamespaceCommand::List { .. } | NamespaceCommand::Get { .. } => None,
-    }
+        ))
+        .with_namespace_kind(public_namespace, append_namespace_prefix)
 }
 
 fn config_mutation_plan(command: &ConfigCommand) -> Option<MutationPlan> {
@@ -1871,6 +1955,19 @@ fn prepare_mutation(
     let context = mutation_runtime_context(cli, output)?;
     let plan = plan.with_context(context.profile, Some(&context.server));
     confirm_mutation(cli, &plan, context.output)?;
+    Ok(plan)
+}
+
+fn prepare_mutation_with_openapi_context(
+    cli: &Cli,
+    openapi: &OpenApiCommandContext,
+    plan: MutationPlan,
+) -> Result<MutationPlan, CliError> {
+    let plan = plan.with_context(
+        openapi.context.profile.clone(),
+        openapi.context.server.as_deref(),
+    );
+    confirm_mutation(cli, &plan, openapi.context.output)?;
     Ok(plan)
 }
 
@@ -2939,6 +3036,7 @@ mod tests {
 
             let rendered = error.render();
             assert!(rendered.body.contains("no changes were made"));
+            assert!(!rendered.body.contains("Follow-up issue"));
             assert!(
                 String::from_utf8(writer)
                     .expect("utf8 output")
@@ -2986,6 +3084,7 @@ mod tests {
             serde_json::from_str(&rendered.body).expect("confirmation json");
         assert_eq!(json["error"]["code"], "confirmation_required");
         assert_eq!(json["error"]["operation"]["operation"], "config.set");
+        assert!(json["error"].get("follow_up_issue").is_none());
         assert!(writer.is_empty());
     }
 
