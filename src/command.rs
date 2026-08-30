@@ -550,7 +550,29 @@ fn execute_namespace(
     cli: &Cli,
     output: OutputFormat,
 ) -> Result<RenderedOutput, CliError> {
+    let mutation_plan = match &command {
+        NamespaceCommand::Create {
+            scope,
+            name,
+            public_namespace,
+            append_namespace_prefix,
+            ..
+        } => Some(prepare_mutation(
+            cli,
+            output,
+            namespace_create_mutation_plan(
+                scope,
+                name,
+                *public_namespace,
+                *append_namespace_prefix,
+            ),
+        )?),
+        NamespaceCommand::List { .. } | NamespaceCommand::Get { .. } => None,
+    };
     let openapi = openapi_context(cli, output)?;
+    if let Some(mutation_plan) = mutation_plan.as_ref() {
+        ensure_approved_runtime_context(mutation_plan, &openapi.context)?;
+    }
     match command {
         NamespaceCommand::List { scope } => {
             ensure_consumer_token_scoped_read_supported(&openapi, "namespace list")?;
@@ -585,6 +607,7 @@ fn execute_namespace(
             comment,
             append_namespace_prefix,
         } => {
+            let mutation_plan = mutation_plan.expect("namespace create mutation plan");
             let operator = operator_for_mutation(
                 operator.as_deref(),
                 &openapi.context,
@@ -597,16 +620,19 @@ fn execute_namespace(
                 public_namespace,
                 append_namespace_prefix,
             )?;
-            let mutation_plan = prepare_mutation_with_openapi_context(
-                cli,
-                &openapi,
-                namespace_create_mutation_plan(
-                    &scope,
-                    &app_namespace_plan.name,
-                    public_namespace,
-                    append_namespace_prefix,
-                ),
-            )?;
+            let resolved_plan = namespace_create_mutation_plan(
+                &scope,
+                &app_namespace_plan.name,
+                public_namespace,
+                append_namespace_prefix,
+            );
+            let contextualized_resolved_plan =
+                mutation_plan_with_openapi_context(&openapi, resolved_plan.clone())?;
+            let mutation_plan = if contextualized_resolved_plan == mutation_plan.plan {
+                mutation_plan
+            } else {
+                prepare_mutation_with_openapi_context(cli, &openapi, resolved_plan)?
+            };
             let app_namespace = register_app_namespace(
                 &openapi,
                 &scope.app,
@@ -634,7 +660,7 @@ fn execute_namespace(
                 "clusterName": &scope.cluster,
                 "appNamespaceName": &app_namespace.name,
             }]);
-            match openapi.mutation_request(&mutation_plan, "POST", &path, Some(body)) {
+            match openapi.mutation_request(&mutation_plan.plan, "POST", &path, Some(body)) {
                 Ok(output) => Ok(output),
                 Err(error) if is_namespace_create_reported_failed(&error) => {
                     match openapi
@@ -645,7 +671,7 @@ fn execute_namespace(
                             let data = redact_nested_item_values(response.data.clone());
                             Ok(render_mutation_response_with_data(
                                 &openapi.writer,
-                                &mutation_plan,
+                                &mutation_plan.plan,
                                 &response,
                                 data,
                             ))
@@ -1030,6 +1056,9 @@ fn execute_config(
         .map(|plan| prepare_mutation(cli, output, plan))
         .transpose()?;
     let openapi = openapi_context(cli, output)?;
+    if let Some(mutation_plan) = mutation_plan.as_ref() {
+        ensure_approved_runtime_context(mutation_plan, &openapi.context)?;
+    }
     match command {
         ConfigCommand::List { scope, page, size } => {
             ensure_config_item_read_supported(&openapi)?;
@@ -1057,7 +1086,10 @@ fn execute_config(
             comment,
             operator,
         } => {
-            let mutation_plan = mutation_plan.as_ref().expect("config set mutation plan");
+            let mutation_plan = &mutation_plan
+                .as_ref()
+                .expect("config set mutation plan")
+                .plan;
             let operator = operator_for_mutation(
                 operator.as_deref(),
                 &openapi.context,
@@ -1107,7 +1139,10 @@ fn execute_config(
             key,
             operator,
         } => {
-            let mutation_plan = mutation_plan.as_ref().expect("config delete mutation plan");
+            let mutation_plan = &mutation_plan
+                .as_ref()
+                .expect("config delete mutation plan")
+                .plan;
             let operator = operator_for_mutation(
                 operator.as_deref(),
                 &openapi.context,
@@ -1150,7 +1185,10 @@ fn execute_config(
             target_namespace,
             operator,
         } => {
-            let mutation_plan = mutation_plan.as_ref().expect("config apply mutation plan");
+            let mutation_plan = &mutation_plan
+                .as_ref()
+                .expect("config apply mutation plan")
+                .plan;
             let operator = operator_for_mutation(
                 operator.as_deref(),
                 &openapi.context,
@@ -1191,6 +1229,9 @@ fn execute_release(
         .map(|plan| prepare_mutation(cli, output, plan))
         .transpose()?;
     let openapi = openapi_context(cli, output)?;
+    if let Some(mutation_plan) = mutation_plan.as_ref() {
+        ensure_approved_runtime_context(mutation_plan, &openapi.context)?;
+    }
     match command {
         ReleaseCommand::List { scope, page, size } => {
             ensure_consumer_token_scoped_read_supported(&openapi, "release list")?;
@@ -1215,6 +1256,7 @@ fn execute_release(
             let mutation_plan = mutation_plan
                 .as_ref()
                 .expect("release create mutation plan");
+            let mutation_plan = &mutation_plan.plan;
             let operator = operator_for_mutation(
                 operator.as_deref(),
                 &openapi.context,
@@ -1247,6 +1289,7 @@ fn execute_release(
             let mutation_plan = mutation_plan
                 .as_ref()
                 .expect("release rollback mutation plan");
+            let mutation_plan = &mutation_plan.plan;
             let operator = operator_for_mutation(
                 operator.as_deref(),
                 &openapi.context,
@@ -1274,6 +1317,9 @@ fn execute_api(args: ApiArgs, cli: &Cli, output: OutputFormat) -> Result<Rendere
         .map(|plan| prepare_mutation(cli, output, plan))
         .transpose()?;
     let openapi = openapi_context(cli, output)?;
+    if let Some(mutation_plan) = mutation_plan.as_ref() {
+        ensure_approved_runtime_context(mutation_plan, &openapi.context)?;
+    }
     let body = match args.body {
         Some(body) => Some(serde_json::from_str::<Value>(&body).map_err(|error| {
             CliError::invalid_input(&error.to_string(), openapi.context.output)
@@ -1282,7 +1328,7 @@ fn execute_api(args: ApiArgs, cli: &Cli, output: OutputFormat) -> Result<Rendere
     };
     match mutation_plan.as_ref() {
         Some(mutation_plan) => {
-            openapi.mutation_request(mutation_plan, args.method.as_str(), &args.path, body)
+            openapi.mutation_request(&mutation_plan.plan, args.method.as_str(), &args.path, body)
         }
         None => openapi.request(args.method.as_str(), &args.path, body),
     }
@@ -1412,6 +1458,13 @@ struct OpenApiCommandContext {
 }
 
 struct MutationRuntimeContext {
+    profile: Option<String>,
+    server: String,
+    output: OutputFormat,
+}
+
+struct ApprovedMutation {
+    plan: MutationPlan,
     profile: Option<String>,
     server: String,
     output: OutputFormat,
@@ -1951,24 +2004,58 @@ fn prepare_mutation(
     cli: &Cli,
     output: OutputFormat,
     plan: MutationPlan,
-) -> Result<MutationPlan, CliError> {
+) -> Result<ApprovedMutation, CliError> {
     let context = mutation_runtime_context(cli, output)?;
-    let plan = plan.with_context(context.profile, Some(&context.server));
+    let plan = plan.with_context(context.profile.clone(), Some(&context.server));
     confirm_mutation(cli, &plan, context.output)?;
-    Ok(plan)
+    Ok(ApprovedMutation {
+        plan,
+        profile: context.profile,
+        server: context.server,
+        output: context.output,
+    })
 }
 
 fn prepare_mutation_with_openapi_context(
     cli: &Cli,
     openapi: &OpenApiCommandContext,
     plan: MutationPlan,
-) -> Result<MutationPlan, CliError> {
-    let plan = plan.with_context(
-        openapi.context.profile.clone(),
-        openapi.context.server.as_deref(),
-    );
+) -> Result<ApprovedMutation, CliError> {
+    let server = required_server(&openapi.context, openapi.context.output)?;
+    let plan = plan.with_context(openapi.context.profile.clone(), Some(&server));
     confirm_mutation(cli, &plan, openapi.context.output)?;
-    Ok(plan)
+    Ok(ApprovedMutation {
+        plan,
+        profile: openapi.context.profile.clone(),
+        server,
+        output: openapi.context.output,
+    })
+}
+
+fn mutation_plan_with_openapi_context(
+    openapi: &OpenApiCommandContext,
+    plan: MutationPlan,
+) -> Result<MutationPlan, CliError> {
+    let server = required_server(&openapi.context, openapi.context.output)?;
+    Ok(plan.with_context(openapi.context.profile.clone(), Some(&server)))
+}
+
+fn ensure_approved_runtime_context(
+    approved: &ApprovedMutation,
+    context: &RuntimeContext,
+) -> Result<(), CliError> {
+    let server = required_server(context, context.output)?;
+    if approved.profile == context.profile
+        && approved.server == server
+        && approved.output == context.output
+    {
+        return Ok(());
+    }
+
+    Err(CliError::invalid_input(
+        "Apollo runtime context changed after confirmation; no OpenAPI request was sent. Re-run the command to review the current profile and server.",
+        approved.output,
+    ))
 }
 
 fn confirm_mutation(cli: &Cli, plan: &MutationPlan, output: OutputFormat) -> Result<(), CliError> {
@@ -3108,6 +3195,46 @@ mod tests {
         assert!(output.contains("Release title: [REDACTED]"));
         assert!(!output.contains("apollo_pat_secret_title"));
         assert!(!output.contains("Proceed with this mutation?"));
+    }
+
+    #[test]
+    fn approved_runtime_context_rejects_profile_server_or_output_changes() {
+        let approved = super::ApprovedMutation {
+            plan: mutation_plan(),
+            profile: Some("dev".to_owned()),
+            server: "https://apollo.example.com".to_owned(),
+            output: OutputFormat::Table,
+        };
+        let matching = crate::config::RuntimeContext {
+            profile: Some("dev".to_owned()),
+            server: Some("https://apollo.example.com".to_owned()),
+            output: OutputFormat::Table,
+            auth_mode: crate::cli::AuthMode::ConsumerToken,
+            operator: None,
+            credential: None,
+        };
+        super::ensure_approved_runtime_context(&approved, &matching)
+            .expect("matching runtime context");
+
+        for changed in [
+            crate::config::RuntimeContext {
+                profile: Some("prod".to_owned()),
+                ..matching.clone()
+            },
+            crate::config::RuntimeContext {
+                server: Some("https://other.example.com".to_owned()),
+                ..matching.clone()
+            },
+            crate::config::RuntimeContext {
+                output: OutputFormat::Json,
+                ..matching.clone()
+            },
+        ] {
+            let error = super::ensure_approved_runtime_context(&approved, &changed)
+                .expect_err("changed runtime context should be rejected");
+            assert!(error.render().body.contains("runtime context changed"));
+            assert!(error.render().body.contains("no OpenAPI request was sent"));
+        }
     }
 
     #[test]

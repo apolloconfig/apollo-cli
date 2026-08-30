@@ -820,6 +820,39 @@ fn mutating_commands_require_yes_before_network_call() {
 }
 
 #[test]
+fn namespace_create_requires_initial_confirmation_before_preflight_requests() {
+    let server = TestServer::empty();
+    let home = temp_home();
+    write_config(&home, &profile_config(&server.url()));
+
+    let assert = base_command(&home)
+        .env("APOLLO_TOKEN", "consumer-token")
+        .args([
+            "--output",
+            "json",
+            "namespace",
+            "create",
+            "--env",
+            "DEV",
+            "--app",
+            "demo",
+            "--public",
+            "application.yml",
+        ])
+        .assert()
+        .code(1);
+
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf8 stderr");
+    let json: Value = serde_json::from_str(&stderr).expect("json stderr");
+    assert_eq!(json["error"]["code"], "confirmation_required");
+    assert_eq!(
+        json["error"]["operation"]["target"]["namespace"],
+        "application.yml"
+    );
+    server.assert_no_request();
+}
+
+#[test]
 fn yes_in_table_mode_prints_target_summary_before_mutation() {
     let server = TestServer::json(r#"{"key":"timeout","value":"3000"}"#);
     let home = temp_home();

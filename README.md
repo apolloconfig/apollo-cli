@@ -316,6 +316,12 @@ non-interactive mode and in JSON mode, mutations require `--yes`; otherwise the 
 `confirmation_required` error whose `operation` field contains the redacted plan. Rejection occurs
 before any OpenAPI request is sent.
 
+Namespace creation may perform read-only preflight requests after that initial approval. If Apollo
+resolves a different effective namespace name, such as adding an organization prefix to a public
+namespace, the CLI shows the resolved plan and requires approval again before either mutation is
+sent. If the selected profile, server, or output mode changes after approval, the CLI aborts before
+sending an OpenAPI request and asks the caller to review the new context.
+
 With `--yes`, table mode still writes the plan before the request. A successful JSON response stays
 one valid JSON document and preserves the existing top-level `status` and `data` fields while adding
 the top-level `operation` plan.

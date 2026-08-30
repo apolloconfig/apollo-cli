@@ -273,6 +273,8 @@ apollo --profile dev auth capabilities
 
 在交互式 table 模式中，未传 `--yes` 的变更会把计划和默认拒绝的 `[y/N]` 提示写到 stderr。只有输入 `y` 或 `yes` 才会执行；输入 `n`、`no`、空行或遇到 EOF 都会拒绝。在非交互模式和 JSON 模式中，变更必须显式传入 `--yes`；否则 CLI 返回 `confirmation_required`，其 `operation` 字段包含脱敏计划。拒绝发生在任何 OpenAPI 请求发送之前。
 
+namespace 创建只会在首次批准后发送只读预检请求。如果 Apollo 解析出的最终 namespace 名称发生变化，例如为公共 namespace 添加组织前缀，CLI 会展示解析后的计划，并在发送任何变更请求前再次要求批准。如果批准后选中的 profile、server 或输出模式发生变化，CLI 会在发送 OpenAPI 请求前中止，并要求调用方重新检查新的运行上下文。
+
 传入 `--yes` 时，table 模式仍会在请求前输出计划。成功的 JSON 输出仍是一个完整 JSON 文档，并保留现有顶层 `status` 和 `data` 字段，同时新增顶层 `operation` 计划。
 
 ## OpenAPI 行为
