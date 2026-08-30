@@ -17,7 +17,7 @@ use crate::config::{
 use crate::credential;
 use crate::error::CliError;
 use crate::http::{OpenApiClient, OpenApiResponse, append_query, encode_path_segment};
-use crate::mutation::{MutationPlan, MutationScope};
+use crate::mutation::{MutationChangeCounts, MutationPlan, MutationScope};
 use crate::output::{OutputWriter, RenderedOutput};
 use crate::redaction::{Redactor, Sensitive};
 
@@ -1164,19 +1164,27 @@ fn execute_config(
             let sync_items = source_sync_items(&openapi, &scope)?;
             let body = sync_body(
                 &scope,
-                target_env,
-                target_cluster,
-                target_namespace,
-                sync_items,
+                &target_env,
+                &target_cluster,
+                target_namespace.as_deref(),
+                &sync_items,
             );
-            let path = format!("{}/items/diff", namespace_path(&scope));
-            let response = openapi.client.request("POST", &path, Some(body))?;
-            let data = redact_config_item_values(response.data.clone());
-            Ok(render_openapi_response_with_data(
-                &openapi.writer,
-                &response,
-                data,
-            ))
+            let target = sync_target_scope(
+                &scope,
+                &target_env,
+                &target_cluster,
+                target_namespace.as_deref(),
+            );
+            let assessment = assess_config_sync(&openapi, &scope, &target, &body)?;
+            let response = ConfigSyncResponse::new(
+                "preview",
+                namespace_mutation_scope(&scope),
+                namespace_mutation_scope(&target),
+                assessment.changes,
+            );
+            Ok(openapi
+                .writer
+                .render_success(&response, response.render_table()))
         }
         ConfigCommand::Apply {
             scope,
@@ -1185,10 +1193,7 @@ fn execute_config(
             target_namespace,
             operator,
         } => {
-            let mutation_plan = &mutation_plan
-                .as_ref()
-                .expect("config apply mutation plan")
-                .plan;
+            let initial_mutation = mutation_plan.as_ref().expect("config apply mutation plan");
             let operator = operator_for_mutation(
                 operator.as_deref(),
                 &openapi.context,
@@ -1205,17 +1210,68 @@ fn execute_config(
             let sync_items = source_sync_items(&openapi, &scope)?;
             let body = sync_body(
                 &scope,
-                target_env,
-                target_cluster,
-                target_namespace,
-                sync_items,
+                &target_env,
+                &target_cluster,
+                target_namespace.as_deref(),
+                &sync_items,
             );
+            let target = sync_target_scope(
+                &scope,
+                &target_env,
+                &target_cluster,
+                target_namespace.as_deref(),
+            );
+            let assessment = assess_config_sync(&openapi, &scope, &target, &body)?;
+            let detailed_plan = initial_mutation
+                .plan
+                .clone()
+                .with_config_sync(assessment.changes.clone());
+
+            if assessment.is_noop() {
+                let response = ConfigSyncResponse::new(
+                    "no-op",
+                    namespace_mutation_scope(&scope),
+                    namespace_mutation_scope(&target),
+                    assessment.changes,
+                );
+                return Ok(openapi.writer.render_mutation_success(
+                    &detailed_plan,
+                    &response,
+                    response.render_table(),
+                ));
+            }
+
+            let approved = prepare_mutation_with_openapi_context(cli, &openapi, detailed_plan)?;
+            let current_assessment = request_config_diff(&openapi, &scope, &target, &body)?;
+            if current_assessment != assessment {
+                return Err(CliError::stale_plan(
+                    "The target configuration changed after the apply plan was approved; no synchronize request was sent. Re-run the command to review a fresh plan.",
+                    approved.plan,
+                    openapi.context.output,
+                ));
+            }
+
             let path = append_optional_query(
                 format!("{}/items/synchronize", namespace_path(&scope)),
                 "operator",
                 operator.as_deref(),
             );
-            openapi.mutation_request(mutation_plan, "POST", &path, Some(body))
+            let synchronize_response =
+                openapi
+                    .client
+                    .request_with_redacted_error_body("POST", &path, Some(body))?;
+            let response = ConfigSyncResponse::with_status(
+                synchronize_response.status,
+                "applied",
+                namespace_mutation_scope(&scope),
+                namespace_mutation_scope(&target),
+                assessment.changes,
+            );
+            Ok(openapi.writer.render_mutation_success(
+                &approved.plan,
+                &response,
+                response.render_table(),
+            ))
         }
     }
 }
@@ -2255,57 +2311,305 @@ fn source_sync_items(
 
     let mut items = Vec::new();
     let mut page = DEFAULT_PAGE;
+    let mut expected_total = None;
 
     loop {
         let mut path = format!("{}/items", namespace_path(scope));
         path = append_query(path, "page", &page.to_string());
         path = append_query(path, "size", &SYNC_ITEMS_PAGE_SIZE.to_string());
-        let response = openapi.client.request("GET", &path, None)?;
-        let content = item_page_content(&response.data, openapi.context.output)?;
+        let response = openapi
+            .client
+            .request_with_redacted_error_body("GET", &path, None)?;
+        let (content, total) = validated_item_page(
+            &response.data,
+            page,
+            SYNC_ITEMS_PAGE_SIZE,
+            openapi.context.output,
+        )?;
+        if let Some(expected_total) = expected_total
+            && expected_total != total
+        {
+            return Err(CliError::invalid_input(
+                "OpenAPI item pagination total changed while the source snapshot was being read",
+                openapi.context.output,
+            ));
+        }
+        expected_total = Some(total);
         let content_len = content.len();
         items.extend(content);
 
-        let total = response.data.get("total").and_then(Value::as_u64);
-        if total.is_some_and(|total| items.len() as u64 >= total)
-            || content_len < SYNC_ITEMS_PAGE_SIZE as usize
-        {
+        if items.len() as u64 > total {
+            return Err(CliError::invalid_input(
+                "OpenAPI item pagination returned more source items than its declared total",
+                openapi.context.output,
+            ));
+        }
+        if items.len() as u64 == total {
             break;
         }
-        page += 1;
+        if content_len != SYNC_ITEMS_PAGE_SIZE as usize {
+            return Err(CliError::invalid_input(
+                "OpenAPI item pagination returned a partial source page before the declared total was reached",
+                openapi.context.output,
+            ));
+        }
+        page = page.checked_add(1).ok_or_else(|| {
+            CliError::invalid_input(
+                "OpenAPI item pagination exceeded the supported page range",
+                openapi.context.output,
+            )
+        })?;
     }
 
     Ok(items)
 }
 
-fn item_page_content(data: &Value, output: OutputFormat) -> Result<Vec<Value>, CliError> {
-    data.get("content")
+fn validated_item_page(
+    data: &Value,
+    expected_page: u32,
+    expected_size: u32,
+    output: OutputFormat,
+) -> Result<(Vec<Value>, u64), CliError> {
+    let content = data
+        .get("content")
         .and_then(Value::as_array)
-        .or_else(|| data.as_array())
         .cloned()
         .ok_or_else(|| {
             CliError::invalid_input(
                 "OpenAPI item list response did not contain a content array",
                 output,
             )
-        })
+        })?;
+    let page = data.get("page").and_then(Value::as_u64).ok_or_else(|| {
+        CliError::invalid_input(
+            "OpenAPI item list response did not contain a valid page number",
+            output,
+        )
+    })?;
+    let size = data.get("size").and_then(Value::as_u64).ok_or_else(|| {
+        CliError::invalid_input(
+            "OpenAPI item list response did not contain a valid page size",
+            output,
+        )
+    })?;
+    let total = data.get("total").and_then(Value::as_u64).ok_or_else(|| {
+        CliError::invalid_input(
+            "OpenAPI item list response did not contain a valid total",
+            output,
+        )
+    })?;
+
+    if page != u64::from(expected_page) || size != u64::from(expected_size) {
+        return Err(CliError::invalid_input(
+            "OpenAPI item list pagination metadata did not match the requested source page",
+            output,
+        ));
+    }
+    if content.len() > expected_size as usize {
+        return Err(CliError::invalid_input(
+            "OpenAPI item list response exceeded the requested source page size",
+            output,
+        ));
+    }
+
+    Ok((content, total))
 }
 
 fn sync_body(
     scope: &NamespaceScopeArgs,
-    target_env: String,
-    target_cluster: String,
-    target_namespace: Option<String>,
-    sync_items: Vec<Value>,
+    target_env: &str,
+    target_cluster: &str,
+    target_namespace: Option<&str>,
+    sync_items: &[Value],
 ) -> Value {
     json!({
         "syncToNamespaces": [{
             "appId": scope.cluster_scope.app.clone(),
             "env": target_env,
             "clusterName": target_cluster,
-            "namespaceName": target_namespace.unwrap_or_else(|| scope.namespace.clone()),
+            "namespaceName": target_namespace.unwrap_or(&scope.namespace),
         }],
         "syncItems": sync_items,
     })
+}
+
+fn sync_target_scope(
+    source: &NamespaceScopeArgs,
+    target_env: &str,
+    target_cluster: &str,
+    target_namespace: Option<&str>,
+) -> NamespaceScopeArgs {
+    NamespaceScopeArgs {
+        cluster_scope: ClusterScopeArgs {
+            env: target_env.to_owned(),
+            app: source.cluster_scope.app.clone(),
+            cluster: target_cluster.to_owned(),
+        },
+        namespace: target_namespace.unwrap_or(&source.namespace).to_owned(),
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ConfigSyncAssessment {
+    changes: MutationChangeCounts,
+    change_set: Value,
+}
+
+impl ConfigSyncAssessment {
+    fn is_noop(&self) -> bool {
+        self.changes.create == 0 && self.changes.update == 0 && self.changes.delete == 0
+    }
+}
+
+fn assess_config_sync(
+    openapi: &OpenApiCommandContext,
+    source: &NamespaceScopeArgs,
+    target: &NamespaceScopeArgs,
+    body: &Value,
+) -> Result<ConfigSyncAssessment, CliError> {
+    request_config_diff(openapi, source, target, body)
+}
+
+fn request_config_diff(
+    openapi: &OpenApiCommandContext,
+    source: &NamespaceScopeArgs,
+    target: &NamespaceScopeArgs,
+    body: &Value,
+) -> Result<ConfigSyncAssessment, CliError> {
+    let path = format!("{}/items/diff", namespace_path(source));
+    let sync_items = body
+        .get("syncItems")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let response =
+        openapi
+            .client
+            .request_with_redacted_error_body("POST", &path, Some(body.clone()))?;
+    parse_config_diff_assessment(
+        &response.data,
+        target,
+        sync_items.len(),
+        openapi.context.output,
+    )
+}
+
+fn parse_config_diff_assessment(
+    data: &Value,
+    target: &NamespaceScopeArgs,
+    source_item_count: usize,
+    output: OutputFormat,
+) -> Result<ConfigSyncAssessment, CliError> {
+    let entries = data.as_array().ok_or_else(|| {
+        CliError::invalid_input("OpenAPI config diff response was not an array", output)
+    })?;
+    if entries.len() != 1 {
+        return Err(CliError::invalid_input(
+            "OpenAPI config diff response did not contain exactly one target assessment",
+            output,
+        ));
+    }
+    let entry = &entries[0];
+    if entry
+        .get("code")
+        .and_then(Value::as_i64)
+        .is_some_and(|code| code != 0)
+        || entry
+            .get("message")
+            .and_then(Value::as_str)
+            .is_some_and(|message| !message.trim().is_empty())
+        || entry
+            .get("extInfo")
+            .and_then(Value::as_str)
+            .is_some_and(|message| !message.trim().is_empty())
+    {
+        return Err(CliError::invalid_input(
+            "Apollo could not assess the requested target namespace; no synchronize request was sent",
+            output,
+        ));
+    }
+    validate_diff_target(entry.get("namespace"), target, output)?;
+
+    let change_set = entry.get("diffs").unwrap_or(entry);
+    let create_items = diff_items(change_set, "createItems", output)?;
+    let update_items = diff_items(change_set, "updateItems", output)?;
+    let delete_items = diff_items(change_set, "deleteItems", output)?;
+    if !delete_items.is_empty() {
+        return Err(CliError::invalid_input(
+            "Apollo reported delete operations for config apply, which violates the conservative merge contract; no synchronize request was sent",
+            output,
+        ));
+    }
+    let changed = create_items
+        .len()
+        .checked_add(update_items.len())
+        .ok_or_else(|| CliError::invalid_input("OpenAPI config diff counts overflowed", output))?;
+    if changed > source_item_count {
+        return Err(CliError::invalid_input(
+            "OpenAPI config diff reported more changes than the captured source snapshot contains",
+            output,
+        ));
+    }
+
+    Ok(ConfigSyncAssessment {
+        changes: MutationChangeCounts {
+            create: create_items.len(),
+            update: update_items.len(),
+            delete: 0,
+            unchanged: source_item_count - changed,
+        },
+        change_set: json!({
+            "createItems": create_items,
+            "updateItems": update_items,
+            "deleteItems": delete_items,
+        }),
+    })
+}
+
+fn validate_diff_target(
+    namespace: Option<&Value>,
+    target: &NamespaceScopeArgs,
+    output: OutputFormat,
+) -> Result<(), CliError> {
+    let namespace = namespace.and_then(Value::as_object).ok_or_else(|| {
+        CliError::invalid_input(
+            "OpenAPI config diff response did not identify the assessed target namespace",
+            output,
+        )
+    })?;
+    let matches = namespace.get("appId").and_then(Value::as_str)
+        == Some(target.cluster_scope.app.as_str())
+        && namespace
+            .get("env")
+            .and_then(Value::as_str)
+            .is_some_and(|env| env.eq_ignore_ascii_case(&target.cluster_scope.env))
+        && namespace.get("clusterName").and_then(Value::as_str)
+            == Some(target.cluster_scope.cluster.as_str())
+        && namespace.get("namespaceName").and_then(Value::as_str)
+            == Some(target.namespace.as_str());
+    if !matches {
+        return Err(CliError::invalid_input(
+            "OpenAPI config diff response target did not match the requested target namespace",
+            output,
+        ));
+    }
+    Ok(())
+}
+
+fn diff_items<'a>(
+    change_set: &'a Value,
+    field: &str,
+    output: OutputFormat,
+) -> Result<&'a Vec<Value>, CliError> {
+    change_set
+        .get(field)
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            CliError::invalid_input(
+                &format!("OpenAPI config diff response did not contain a valid {field} array"),
+                output,
+            )
+        })
 }
 
 fn resolve_setup_profile_name(
@@ -2792,6 +3096,74 @@ fn read_prompt_line<R: BufRead>(reader: &mut R, output: OutputFormat) -> Result<
         return Err(CliError::invalid_input("input aborted", output));
     }
     Ok(line)
+}
+
+#[derive(Serialize)]
+struct ConfigSyncResponse {
+    status: u16,
+    data: ConfigSyncResult,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConfigSyncResult {
+    result: &'static str,
+    strategy: &'static str,
+    target_only_behavior: &'static str,
+    source: MutationScope,
+    target: MutationScope,
+    changes: MutationChangeCounts,
+}
+
+impl ConfigSyncResponse {
+    fn new(
+        result: &'static str,
+        source: MutationScope,
+        target: MutationScope,
+        changes: MutationChangeCounts,
+    ) -> Self {
+        Self::with_status(200, result, source, target, changes)
+    }
+
+    fn with_status(
+        status: u16,
+        result: &'static str,
+        source: MutationScope,
+        target: MutationScope,
+        changes: MutationChangeCounts,
+    ) -> Self {
+        Self {
+            status,
+            data: ConfigSyncResult {
+                result,
+                strategy: "merge",
+                target_only_behavior: "preserve",
+                source,
+                target,
+                changes,
+            },
+        }
+    }
+
+    fn render_table(&self) -> String {
+        let result = match self.data.result {
+            "preview" => "Config synchronization preview",
+            "no-op" => "Config synchronization is already up to date; no mutation was sent",
+            "applied" => "Config synchronization completed successfully",
+            result => result,
+        };
+        format!(
+            "{result}.\nStrategy: {}\nTarget-only behavior: {}\nSource: {}\nTarget: {}\nCreate count: {}\nUpdate count: {}\nDelete count: {}\nUnchanged count: {}",
+            self.data.strategy,
+            self.data.target_only_behavior,
+            self.data.source.render_table(),
+            self.data.target.render_table(),
+            self.data.changes.create,
+            self.data.changes.update,
+            self.data.changes.delete,
+            self.data.changes.unchanged,
+        )
+    }
 }
 
 #[derive(Serialize)]

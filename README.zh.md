@@ -277,6 +277,14 @@ namespace 创建只会在首次批准后发送只读预检请求。如果 Apollo
 
 传入 `--yes` 时，table 模式仍会在请求前输出计划。成功的 JSON 输出仍是一个完整 JSON 文档，并保留现有顶层 `status` 和 `data` 字段，同时新增顶层 `operation` 计划。
 
+### 配置同步约定
+
+`config diff` 和 `config apply` 采用保守合并约定：只存在于源端的 key 会被创建，源端 value 或 comment 不同的 key 会被更新，相同 key 保持不变，只存在于目标端的 key 会被保留。因此，空源端会得到成功的 no-op，而不会清空目标端。CLI 当前不提供 `--prune`；删除必须通过独立、显式的配置删除流程完成。如果某个 Portal 版本通过同步 diff 接口返回删除操作，CLI 会拒绝该计划，并且不会调用 `items/synchronize`。
+
+table 和 JSON 输出都会给出源端与目标端 scope，以及 `create`、`update`、`delete`、`unchanged` 计数。JSON 约定还会返回 `strategy: "merge"` 和 `targetOnlyBehavior: "preserve"`。diff 结果、apply 计划和 apply 结果都不会包含配置 value。
+
+单独执行的 `config diff` 仅供参考，不会生成可供后续调用消费的计划制品。`config apply` 会自行捕获完整分页的源端快照，用这份快照调用 `items/diff`，并根据返回的变更集生成详细变更计划。批准后，CLI 会使用同一份已捕获的源端快照再次评估目标端；如果评估结果发生变化，命令会返回 `stale_plan`，且不会发送同步请求。如果所有变更计数均为零，命令会返回确定性的 `data.result: "no-op"` 成功结果，并且不会调用 `items/synchronize`。
+
 ## OpenAPI 行为
 
 第一版 v0 实现使用一个小型通用 HTTP client，而不是生成式 SDK。这样可以让 CLI 与 Apollo 服务端仓库解耦，同时仍然保证所有内置资源命令都限定在 `/openapi/v1/*`。

@@ -31,6 +31,12 @@ pub struct MutationPlan {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub append_namespace_prefix: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub strategy: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_only_behavior: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub changes: Option<MutationChangeCounts>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub request: Option<MutationRequest>,
 }
 
@@ -50,6 +56,9 @@ impl MutationPlan {
             to_release_id: None,
             public_namespace: None,
             append_namespace_prefix: None,
+            strategy: None,
+            target_only_behavior: None,
+            changes: None,
             request: None,
         }
     }
@@ -94,6 +103,13 @@ impl MutationPlan {
         self
     }
 
+    pub fn with_config_sync(mut self, changes: MutationChangeCounts) -> Self {
+        self.strategy = Some("merge".to_owned());
+        self.target_only_behavior = Some("preserve".to_owned());
+        self.changes = Some(changes);
+        self
+    }
+
     pub fn with_request(mut self, method: impl Into<String>, path: &str) -> Self {
         self.request = Some(MutationRequest::new(method, path));
         self
@@ -134,6 +150,18 @@ impl MutationPlan {
                 "Append namespace prefix: {append_namespace_prefix}"
             ));
         }
+        push_optional(&mut lines, "Strategy", self.strategy.as_deref());
+        push_optional(
+            &mut lines,
+            "Target-only behavior",
+            self.target_only_behavior.as_deref(),
+        );
+        if let Some(changes) = &self.changes {
+            lines.push(format!("Create count: {}", changes.create));
+            lines.push(format!("Update count: {}", changes.update));
+            lines.push(format!("Delete count: {}", changes.delete));
+            lines.push(format!("Unchanged count: {}", changes.unchanged));
+        }
         if let Some(request) = &self.request {
             lines.push(format!("Method: {}", table_value(&request.method)));
             lines.push(format!("Path: {}", table_value(&request.path)));
@@ -151,6 +179,15 @@ impl MutationPlan {
         }
         lines.join("\n")
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MutationChangeCounts {
+    pub create: usize,
+    pub update: usize,
+    pub delete: usize,
+    pub unchanged: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -190,7 +227,7 @@ impl MutationScope {
         }
     }
 
-    fn render_table(&self) -> String {
+    pub fn render_table(&self) -> String {
         let fields = [
             ("app", self.app.as_deref()),
             ("env", self.env.as_deref()),

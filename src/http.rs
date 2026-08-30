@@ -90,6 +90,25 @@ impl OpenApiClient {
         path: &str,
         body: Option<Value>,
     ) -> Result<OpenApiResponse, CliError> {
+        self.request_internal(method, path, body, false)
+    }
+
+    pub fn request_with_redacted_error_body(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<Value>,
+    ) -> Result<OpenApiResponse, CliError> {
+        self.request_internal(method, path, body, true)
+    }
+
+    fn request_internal(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<Value>,
+        redact_error_body: bool,
+    ) -> Result<OpenApiResponse, CliError> {
         let path = normalize_openapi_path(path, self.format)?;
         let url = format!("{}{}", self.server, path);
         let method = reqwest::Method::from_bytes(method.as_bytes())
@@ -118,7 +137,11 @@ impl OpenApiClient {
             .map_err(|error| CliError::network(&path, &error.to_string(), self.format))?;
 
         if !status.is_success() {
-            let mut body = sanitize_error_body(&body, self.token.expose_secret());
+            let mut body = if redact_error_body && !body.trim().is_empty() {
+                "[REDACTED]".to_owned()
+            } else {
+                sanitize_error_body(&body, self.token.expose_secret())
+            };
             if body.is_empty()
                 && let Some(location) = redirect_location
             {

@@ -760,7 +760,7 @@ fn single_read_commands_redact_broad_config_values() {
         (
             200,
             "application/json",
-            r#"{"createItems":[{"key":"db.password","value":"s3cr3t"}],"updateItems":[{"key":"plain","oldValue":"old","newValue":"s3cr3t"}]}"#,
+            r#"[{"code":0,"message":"","namespace":{"appId":"demo","env":"FAT","clusterName":"default","namespaceName":"application"},"createItems":[{"key":"db.password","value":"s3cr3t"}],"updateItems":[],"deleteItems":[]}]"#,
         ),
     ]);
     write_config(
@@ -785,10 +785,12 @@ fn single_read_commands_redact_broad_config_values() {
         .success();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
     let json: Value = serde_json::from_str(&stdout).expect("json stdout");
-    assert_eq!(json["data"]["createItems"][0]["value"], "[REDACTED]");
-    assert_eq!(json["data"]["updateItems"][0]["oldValue"], "[REDACTED]");
-    assert_eq!(json["data"]["updateItems"][0]["newValue"], "[REDACTED]");
+    assert_eq!(json["data"]["result"], "preview");
+    assert_eq!(json["data"]["strategy"], "merge");
+    assert_eq!(json["data"]["targetOnlyBehavior"], "preserve");
+    assert_eq!(json["data"]["changes"]["create"], 1);
     assert!(!stdout.contains("s3cr3t"));
+    assert!(!stdout.contains("db.password"));
 }
 
 #[test]
@@ -2550,6 +2552,16 @@ fn config_apply_with_yes_uses_synchronize_endpoint() {
             "application/json",
             r#"{"content":[{"key":"timeout","value":"3000"}],"page":0,"size":500,"total":1}"#,
         ),
+        (
+            200,
+            "application/json",
+            r#"[{"code":0,"message":"","namespace":{"appId":"demo","env":"FAT","clusterName":"default","namespaceName":"application"},"createItems":[{"key":"timeout","value":"3000"}],"updateItems":[],"deleteItems":[]}]"#,
+        ),
+        (
+            200,
+            "application/json",
+            r#"[{"code":0,"message":"","namespace":{"appId":"demo","env":"FAT","clusterName":"default","namespaceName":"application"},"createItems":[{"key":"timeout","value":"3000"}],"updateItems":[],"deleteItems":[]}]"#,
+        ),
         (200, "application/json", "{}"),
     ]);
     let home = temp_home();
@@ -2582,8 +2594,15 @@ fn config_apply_with_yes_uses_synchronize_endpoint() {
     assert_eq!(json["operation"]["source"]["env"], "DEV");
     assert_eq!(json["operation"]["target"]["env"], "FAT");
     assert_eq!(json["operation"]["target"]["namespace"], "application");
+    assert_eq!(json["operation"]["strategy"], "merge");
+    assert_eq!(json["operation"]["targetOnlyBehavior"], "preserve");
+    assert_eq!(json["operation"]["changes"]["create"], 1);
+    assert_eq!(json["operation"]["changes"]["update"], 0);
+    assert_eq!(json["operation"]["changes"]["delete"], 0);
+    assert_eq!(json["operation"]["changes"]["unchanged"], 0);
+    assert_eq!(json["data"]["result"], "applied");
 
-    let requests = server.requests(2);
+    let requests = server.requests(4);
     assert_eq!(requests[0].method, "GET");
     assert_eq!(
         requests[0].path,
@@ -2592,15 +2611,107 @@ fn config_apply_with_yes_uses_synchronize_endpoint() {
     assert_eq!(requests[1].method, "POST");
     assert_eq!(
         requests[1].path,
+        "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/application/items/diff"
+    );
+    assert_eq!(requests[2].method, "POST");
+    assert_eq!(
+        requests[2].path,
+        "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/application/items/diff"
+    );
+    assert_eq!(requests[3].method, "POST");
+    assert_eq!(
+        requests[3].path,
         "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/application/items/synchronize"
     );
-    let body: Value = serde_json::from_str(&requests[1].body).expect("json body");
+    assert_eq!(requests[1].body, requests[2].body);
+    assert_eq!(requests[2].body, requests[3].body);
+    let body: Value = serde_json::from_str(&requests[3].body).expect("json body");
     assert_eq!(body["syncToNamespaces"][0]["appId"], "demo");
     assert_eq!(body["syncToNamespaces"][0]["env"], "FAT");
     assert_eq!(body["syncToNamespaces"][0]["clusterName"], "default");
     assert_eq!(body["syncToNamespaces"][0]["namespaceName"], "application");
     assert_eq!(body["syncItems"][0]["key"], "timeout");
     assert_eq!(body["syncItems"][0]["value"], "3000");
+}
+
+#[test]
+fn config_apply_table_shows_detailed_redacted_plan_before_mutation() {
+    let diff = r#"[{"code":0,"message":"","namespace":{"appId":"demo","env":"FAT","clusterName":"default","namespaceName":"application"},"createItems":[{"key":"plain-key","value":"source-secret"}],"updateItems":[],"deleteItems":[]}]"#;
+    let server = TestServer::sequence(vec![
+        (
+            200,
+            "application/json",
+            r#"{"content":[{"key":"plain-key","value":"source-secret"}],"page":0,"size":500,"total":1}"#,
+        ),
+        (200, "application/json", diff),
+        (200, "application/json", diff),
+        (200, "application/json", "{}"),
+    ]);
+    let home = temp_home();
+    write_config(
+        &home,
+        &profile_config_with_auth_mode(&server.url(), "user-token"),
+    );
+
+    let assert = base_command(&home)
+        .env("APOLLO_TOKEN", "apollo_pat_test_token")
+        .args([
+            "--yes",
+            "config",
+            "apply",
+            "--env",
+            "DEV",
+            "--app",
+            "demo",
+            "--target-env",
+            "FAT",
+        ])
+        .assert()
+        .success();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf8 stderr");
+    assert!(stderr.contains("Strategy: merge"));
+    assert!(stderr.contains("Target-only behavior: preserve"));
+    assert!(stderr.contains("Create count: 1"));
+    assert!(stderr.contains("Delete count: 0"));
+    assert!(!stderr.contains("plain-key"));
+    assert!(!stderr.contains("source-secret"));
+
+    let requests = server.requests(4);
+    assert!(requests[2].path.ends_with("/items/diff"));
+    assert!(requests[3].path.ends_with("/items/synchronize"));
+}
+
+#[test]
+fn config_apply_requires_initial_confirmation_before_preflight() {
+    let server = TestServer::empty();
+    let home = temp_home();
+    write_config(
+        &home,
+        &profile_config_with_auth_mode(&server.url(), "user-token"),
+    );
+
+    let assert = base_command(&home)
+        .env("APOLLO_TOKEN", "apollo_pat_test_token")
+        .args([
+            "--output",
+            "json",
+            "config",
+            "apply",
+            "--env",
+            "DEV",
+            "--app",
+            "demo",
+            "--target-env",
+            "FAT",
+        ])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf8 stderr");
+    let json: Value = serde_json::from_str(&stderr).expect("confirmation error json");
+    assert_eq!(json["error"]["code"], "confirmation_required");
+    assert_eq!(json["error"]["operation"]["source"]["env"], "DEV");
+    assert_eq!(json["error"]["operation"]["target"]["env"], "FAT");
+    server.assert_no_request();
 }
 
 #[test]
@@ -2647,7 +2758,11 @@ fn config_diff_populates_sync_items_from_source_namespace() {
             "application/json",
             r#"{"content":[{"key":"timeout","value":"3000"}],"page":0,"size":500,"total":1}"#,
         ),
-        (200, "application/json", "{}"),
+        (
+            200,
+            "application/json",
+            r#"[{"code":0,"message":"","namespace":{"appId":"demo","env":"FAT","clusterName":"default","namespaceName":"application"},"createItems":[{"key":"timeout","value":"3000"}],"updateItems":[],"deleteItems":[]}]"#,
+        ),
     ]);
     let home = temp_home();
     write_config(
@@ -2689,6 +2804,102 @@ fn config_diff_populates_sync_items_from_source_namespace() {
 }
 
 #[test]
+fn config_diff_reports_add_update_unchanged_and_target_only_merge_semantics() {
+    let server = TestServer::sequence(vec![
+        (
+            200,
+            "application/json",
+            r#"{"content":[{"key":"add","value":"add-value-secret"},{"key":"update","value":"update-value-secret"},{"key":"same","value":"same-value-secret"}],"page":0,"size":500,"total":3}"#,
+        ),
+        (
+            200,
+            "application/json",
+            r#"[{"code":0,"message":"","namespace":{"appId":"demo","env":"FAT","clusterName":"default","namespaceName":"application"},"createItems":[{"key":"add","value":"add-value-secret"}],"updateItems":[{"key":"update","value":"update-value-secret"}],"deleteItems":[]}]"#,
+        ),
+    ]);
+    let home = temp_home();
+    write_config(
+        &home,
+        &profile_config_with_auth_mode(&server.url(), "user-token"),
+    );
+
+    let assert = base_command(&home)
+        .env("APOLLO_TOKEN", "apollo_pat_test_token")
+        .args([
+            "--output",
+            "json",
+            "config",
+            "diff",
+            "--env",
+            "DEV",
+            "--app",
+            "demo",
+            "--target-env",
+            "FAT",
+        ])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let json: Value = serde_json::from_str(&stdout).expect("merge matrix json");
+    assert_eq!(json["data"]["changes"]["create"], 1);
+    assert_eq!(json["data"]["changes"]["update"], 1);
+    assert_eq!(json["data"]["changes"]["delete"], 0);
+    assert_eq!(json["data"]["changes"]["unchanged"], 1);
+    assert_eq!(json["data"]["targetOnlyBehavior"], "preserve");
+    for value in [
+        "add-value-secret",
+        "update-value-secret",
+        "same-value-secret",
+    ] {
+        assert!(!stdout.contains(value));
+    }
+}
+
+#[test]
+fn config_diff_table_output_contains_only_scopes_and_counts() {
+    let server = TestServer::sequence(vec![
+        (
+            200,
+            "application/json",
+            r#"{"content":[{"key":"plain-key","value":"source-secret"}],"page":0,"size":500,"total":1}"#,
+        ),
+        (
+            200,
+            "application/json",
+            r#"[{"code":0,"message":"","namespace":{"appId":"demo","env":"FAT","clusterName":"default","namespaceName":"application"},"createItems":[{"key":"plain-key","value":"source-secret"}],"updateItems":[],"deleteItems":[]}]"#,
+        ),
+    ]);
+    let home = temp_home();
+    write_config(
+        &home,
+        &profile_config_with_auth_mode(&server.url(), "user-token"),
+    );
+
+    let assert = base_command(&home)
+        .env("APOLLO_TOKEN", "apollo_pat_test_token")
+        .args([
+            "config",
+            "diff",
+            "--env",
+            "DEV",
+            "--app",
+            "demo",
+            "--target-env",
+            "FAT",
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    assert!(stdout.contains("Source: app=demo env=DEV cluster=default namespace=application"));
+    assert!(stdout.contains("Target: app=demo env=FAT cluster=default namespace=application"));
+    assert!(stdout.contains("Create count: 1"));
+    assert!(stdout.contains("Delete count: 0"));
+    assert!(!stdout.contains("plain-key"));
+    assert!(!stdout.contains("source-secret"));
+}
+
+#[test]
 fn config_diff_keeps_source_sync_items_unredacted_while_redacting_output() {
     let server = TestServer::sequence(vec![
         (
@@ -2699,7 +2910,7 @@ fn config_diff_keeps_source_sync_items_unredacted_while_redacting_output() {
         (
             200,
             "application/json",
-            r#"{"message":"apollo_pat_test_token"}"#,
+            r#"[{"code":0,"message":"","namespace":{"appId":"demo","env":"FAT","clusterName":"default","namespaceName":"application"},"createItems":[{"key":"token-value","value":"source-secret"}],"updateItems":[],"deleteItems":[]}]"#,
         ),
     ]);
     let home = temp_home();
@@ -2727,13 +2938,474 @@ fn config_diff_keeps_source_sync_items_unredacted_while_redacting_output() {
 
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
     let json: Value = serde_json::from_str(&stdout).expect("json stdout");
-    assert_eq!(json["data"]["message"], "[REDACTED]");
+    assert_eq!(json["data"]["changes"]["create"], 1);
+    assert_eq!(json["data"]["changes"]["update"], 0);
     assert!(!stdout.contains("apollo_pat_test_token"));
+    assert!(!stdout.contains("source-secret"));
+    assert!(!stdout.contains("token-value"));
 
     let requests = server.requests(2);
     let body: Value = serde_json::from_str(&requests[1].body).expect("json body");
     assert_eq!(body["syncItems"][0]["key"], "token-value");
     assert_eq!(body["syncItems"][0]["value"], "source-secret");
+}
+
+#[test]
+fn config_apply_noop_returns_stable_success_without_synchronize_request() {
+    let server = TestServer::sequence(vec![
+        (
+            200,
+            "application/json",
+            r#"{"content":[{"key":"timeout","value":"3000"}],"page":0,"size":500,"total":1}"#,
+        ),
+        (
+            200,
+            "application/json",
+            r#"[{"code":0,"message":"","namespace":{"appId":"demo","env":"FAT","clusterName":"default","namespaceName":"application"},"createItems":[],"updateItems":[],"deleteItems":[]}]"#,
+        ),
+    ]);
+    let home = temp_home();
+    write_config(
+        &home,
+        &profile_config_with_auth_mode(&server.url(), "user-token"),
+    );
+
+    let assert = base_command(&home)
+        .env("APOLLO_TOKEN", "apollo_pat_test_token")
+        .args([
+            "--yes",
+            "--output",
+            "json",
+            "config",
+            "apply",
+            "--env",
+            "DEV",
+            "--app",
+            "demo",
+            "--target-env",
+            "FAT",
+        ])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let json: Value = serde_json::from_str(&stdout).expect("no-op json");
+    assert_eq!(json["status"], 200);
+    assert_eq!(json["data"]["result"], "no-op");
+    assert_eq!(json["data"]["strategy"], "merge");
+    assert_eq!(json["data"]["targetOnlyBehavior"], "preserve");
+    assert_eq!(json["data"]["changes"]["create"], 0);
+    assert_eq!(json["data"]["changes"]["update"], 0);
+    assert_eq!(json["data"]["changes"]["delete"], 0);
+    assert_eq!(json["data"]["changes"]["unchanged"], 1);
+    assert_eq!(json["operation"]["changes"], json["data"]["changes"]);
+
+    let requests = server.requests(2);
+    assert_eq!(requests[0].method, "GET");
+    assert_eq!(requests[1].method, "POST");
+    assert!(requests[1].path.ends_with("/items/diff"));
+}
+
+#[test]
+fn config_apply_empty_source_preserves_target_items_and_does_not_mutate() {
+    let server = TestServer::sequence(vec![
+        (
+            200,
+            "application/json",
+            r#"{"content":[],"page":0,"size":500,"total":0}"#,
+        ),
+        (
+            200,
+            "application/json",
+            r#"[{"code":0,"message":"","namespace":{"appId":"demo","env":"FAT","clusterName":"default","namespaceName":"application"},"createItems":[],"updateItems":[],"deleteItems":[]}]"#,
+        ),
+    ]);
+    let home = temp_home();
+    write_config(
+        &home,
+        &profile_config_with_auth_mode(&server.url(), "user-token"),
+    );
+
+    let assert = base_command(&home)
+        .env("APOLLO_TOKEN", "apollo_pat_test_token")
+        .args([
+            "--yes",
+            "--output",
+            "json",
+            "config",
+            "apply",
+            "--env",
+            "DEV",
+            "--app",
+            "demo",
+            "--target-env",
+            "FAT",
+        ])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let json: Value = serde_json::from_str(&stdout).expect("empty-source json");
+    assert_eq!(json["data"]["result"], "no-op");
+    assert_eq!(json["data"]["targetOnlyBehavior"], "preserve");
+    assert_eq!(json["data"]["changes"]["delete"], 0);
+
+    let requests = server.requests(2);
+    assert_eq!(
+        requests[1].path,
+        "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/application/items/diff"
+    );
+    let body: Value = serde_json::from_str(&requests[1].body).expect("empty-source diff body");
+    assert_eq!(body["syncItems"].as_array().map(Vec::len), Some(0));
+}
+
+#[test]
+fn config_apply_aborts_when_target_assessment_changes_after_approval() {
+    let server = TestServer::sequence(vec![
+        (
+            200,
+            "application/json",
+            r#"{"content":[{"key":"db.password","value":"source-secret"}],"page":0,"size":500,"total":1}"#,
+        ),
+        (
+            200,
+            "application/json",
+            r#"[{"code":0,"message":"","namespace":{"appId":"demo","env":"FAT","clusterName":"default","namespaceName":"application"},"createItems":[{"key":"db.password","value":"source-secret"}],"updateItems":[],"deleteItems":[]}]"#,
+        ),
+        (
+            200,
+            "application/json",
+            r#"[{"code":0,"message":"","namespace":{"appId":"demo","env":"FAT","clusterName":"default","namespaceName":"application"},"createItems":[],"updateItems":[{"key":"db.password","value":"source-secret"}],"deleteItems":[]}]"#,
+        ),
+    ]);
+    let home = temp_home();
+    write_config(
+        &home,
+        &profile_config_with_auth_mode(&server.url(), "user-token"),
+    );
+
+    let assert = base_command(&home)
+        .env("APOLLO_TOKEN", "apollo_pat_test_token")
+        .args([
+            "--yes",
+            "--output",
+            "json",
+            "config",
+            "apply",
+            "--env",
+            "DEV",
+            "--app",
+            "demo",
+            "--target-env",
+            "FAT",
+        ])
+        .assert()
+        .failure();
+
+    assert!(assert.get_output().stdout.is_empty());
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf8 stderr");
+    let json: Value = serde_json::from_str(&stderr).expect("stale-plan error json");
+    assert_eq!(json["error"]["code"], "stale_plan");
+    assert_eq!(json["error"]["category"], "conflict");
+    assert_eq!(json["error"]["operation"]["changes"]["create"], 1);
+    assert!(!stderr.contains("source-secret"));
+    assert!(!stderr.contains("db.password"));
+
+    let requests = server.requests(3);
+    assert!(requests[1].path.ends_with("/items/diff"));
+    assert!(requests[2].path.ends_with("/items/diff"));
+}
+
+#[test]
+fn config_diff_rejects_partial_source_page_before_declared_total() {
+    let server = TestServer::json(
+        r#"{"content":[{"key":"only-item","value":"secret"}],"page":0,"size":500,"total":2}"#,
+    );
+    let home = temp_home();
+    write_config(
+        &home,
+        &profile_config_with_auth_mode(&server.url(), "user-token"),
+    );
+
+    let assert = base_command(&home)
+        .env("APOLLO_TOKEN", "apollo_pat_test_token")
+        .args([
+            "--output",
+            "json",
+            "config",
+            "diff",
+            "--env",
+            "DEV",
+            "--app",
+            "demo",
+            "--target-env",
+            "FAT",
+        ])
+        .assert()
+        .failure();
+
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf8 stderr");
+    let json: Value = serde_json::from_str(&stderr).expect("partial-page error json");
+    assert_eq!(json["error"]["code"], "invalid_input");
+    assert!(stderr.contains("partial source page"));
+    assert!(!stderr.contains("secret"));
+}
+
+#[test]
+fn config_diff_redacts_source_page_error_body() {
+    let server = TestServer::new(
+        500,
+        "application/json",
+        r#"{"message":"failed while reading old-target-secret"}"#,
+    );
+    let home = temp_home();
+    write_config(
+        &home,
+        &profile_config_with_auth_mode(&server.url(), "user-token"),
+    );
+
+    let assert = base_command(&home)
+        .env("APOLLO_TOKEN", "apollo_pat_test_token")
+        .args([
+            "--output",
+            "json",
+            "config",
+            "diff",
+            "--env",
+            "DEV",
+            "--app",
+            "demo",
+            "--target-env",
+            "FAT",
+        ])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf8 stderr");
+    let json: Value = serde_json::from_str(&stderr).expect("source error json");
+    assert_eq!(json["error"]["code"], "server_error");
+    assert!(stderr.contains("[REDACTED]"));
+    assert!(!stderr.contains("old-target-secret"));
+}
+
+#[test]
+fn config_diff_reads_more_than_one_source_page() {
+    let first_items = (0..500)
+        .map(|index| serde_json::json!({"key": format!("key-{index}"), "value": "secret"}))
+        .collect::<Vec<_>>();
+    let first_page = leak_json(serde_json::json!({
+        "content": first_items,
+        "page": 0,
+        "size": 500,
+        "total": 501,
+    }));
+    let second_page = leak_json(serde_json::json!({
+        "content": [{"key": "key-500", "value": "secret"}],
+        "page": 1,
+        "size": 500,
+        "total": 501,
+    }));
+    let diff = leak_json(serde_json::json!([{
+        "code": 0,
+        "message": "",
+        "namespace": {
+            "appId": "demo",
+            "env": "FAT",
+            "clusterName": "default",
+            "namespaceName": "application",
+        },
+        "createItems": [],
+        "updateItems": [],
+        "deleteItems": [],
+    }]));
+    let server = TestServer::sequence(vec![
+        (200, "application/json", first_page),
+        (200, "application/json", second_page),
+        (200, "application/json", diff),
+    ]);
+    let home = temp_home();
+    write_config(
+        &home,
+        &profile_config_with_auth_mode(&server.url(), "user-token"),
+    );
+
+    let assert = base_command(&home)
+        .env("APOLLO_TOKEN", "apollo_pat_test_token")
+        .args([
+            "--output",
+            "json",
+            "config",
+            "diff",
+            "--env",
+            "DEV",
+            "--app",
+            "demo",
+            "--target-env",
+            "FAT",
+        ])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    let json: Value = serde_json::from_str(&stdout).expect("multi-page diff json");
+    assert_eq!(json["data"]["changes"]["unchanged"], 501);
+    assert!(!stdout.contains("secret"));
+
+    let requests = server.requests(3);
+    assert!(requests[0].path.ends_with("items?page=0&size=500"));
+    assert!(requests[1].path.ends_with("items?page=1&size=500"));
+    let body: Value = serde_json::from_str(&requests[2].body).expect("diff request json");
+    assert_eq!(body["syncItems"].as_array().map(Vec::len), Some(501));
+}
+
+#[test]
+fn config_apply_rejects_missing_target_assessment_and_permission_failure() {
+    for (status, body, expected_code) in [
+        (
+            200,
+            r#"[{"code":0,"message":"target namespace does not exist","namespace":{"appId":"demo","env":"FAT","clusterName":"default","namespaceName":"application"},"createItems":[],"updateItems":[],"deleteItems":[]}]"#,
+            "invalid_input",
+        ),
+        (403, r#"{"message":"forbidden"}"#, "permission_denied"),
+        (
+            400,
+            r#"{"message":"invalid source value 3000"}"#,
+            "invalid_input",
+        ),
+    ] {
+        let server = TestServer::sequence(vec![
+            (
+                200,
+                "application/json",
+                r#"{"content":[{"key":"timeout","value":"3000"}],"page":0,"size":500,"total":1}"#,
+            ),
+            (status, "application/json", body),
+        ]);
+        let home = temp_home();
+        write_config(
+            &home,
+            &profile_config_with_auth_mode(&server.url(), "user-token"),
+        );
+
+        let assert = base_command(&home)
+            .env("APOLLO_TOKEN", "apollo_pat_test_token")
+            .args([
+                "--yes",
+                "--output",
+                "json",
+                "config",
+                "apply",
+                "--env",
+                "DEV",
+                "--app",
+                "demo",
+                "--target-env",
+                "FAT",
+            ])
+            .assert()
+            .failure();
+        let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf8 stderr");
+        let json: Value = serde_json::from_str(&stderr).expect("apply error json");
+        assert_eq!(json["error"]["code"], expected_code);
+        assert!(!stderr.contains("3000"));
+    }
+}
+
+#[test]
+fn config_apply_rejects_server_side_deletes_under_merge_contract() {
+    let server = TestServer::sequence(vec![
+        (
+            200,
+            "application/json",
+            r#"{"content":[{"key":"source","value":"secret"}],"page":0,"size":500,"total":1}"#,
+        ),
+        (
+            200,
+            "application/json",
+            r#"[{"code":0,"message":"","namespace":{"appId":"demo","env":"FAT","clusterName":"default","namespaceName":"application"},"createItems":[],"updateItems":[],"deleteItems":[{"key":"target-only","value":"keep-me"}]}]"#,
+        ),
+    ]);
+    let home = temp_home();
+    write_config(
+        &home,
+        &profile_config_with_auth_mode(&server.url(), "user-token"),
+    );
+
+    let assert = base_command(&home)
+        .env("APOLLO_TOKEN", "apollo_pat_test_token")
+        .args([
+            "--yes",
+            "--output",
+            "json",
+            "config",
+            "apply",
+            "--env",
+            "DEV",
+            "--app",
+            "demo",
+            "--target-env",
+            "FAT",
+        ])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf8 stderr");
+    assert!(stderr.contains("conservative merge contract"));
+    assert!(!stderr.contains("target-only"));
+    assert!(!stderr.contains("keep-me"));
+}
+
+#[test]
+fn config_apply_redacts_source_values_from_synchronize_errors() {
+    let diff = r#"[{"code":0,"message":"","namespace":{"appId":"demo","env":"FAT","clusterName":"default","namespaceName":"application"},"createItems":[{"key":"plain-key","value":"source-secret"}],"updateItems":[],"deleteItems":[]}]"#;
+    let server = TestServer::sequence(vec![
+        (
+            200,
+            "application/json",
+            r#"{"content":[{"key":"plain-key","value":"source-secret"}],"page":0,"size":500,"total":1}"#,
+        ),
+        (200, "application/json", diff),
+        (200, "application/json", diff),
+        (
+            400,
+            "application/json",
+            r#"{"message":"could not apply source-secret"}"#,
+        ),
+    ]);
+    let home = temp_home();
+    write_config(
+        &home,
+        &profile_config_with_auth_mode(&server.url(), "user-token"),
+    );
+
+    let assert = base_command(&home)
+        .env("APOLLO_TOKEN", "apollo_pat_test_token")
+        .args([
+            "--yes",
+            "--output",
+            "json",
+            "config",
+            "apply",
+            "--env",
+            "DEV",
+            "--app",
+            "demo",
+            "--target-env",
+            "FAT",
+        ])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf8 stderr");
+    let json: Value = serde_json::from_str(&stderr).expect("synchronize error json");
+    assert_eq!(json["error"]["code"], "invalid_input");
+    assert!(stderr.contains("[REDACTED]"));
+    assert!(!stderr.contains("source-secret"));
+}
+
+fn leak_json(value: Value) -> &'static str {
+    Box::leak(
+        serde_json::to_string(&value)
+            .expect("serialize test json")
+            .into_boxed_str(),
+    )
 }
 
 #[derive(Debug)]
