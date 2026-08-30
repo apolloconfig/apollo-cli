@@ -391,8 +391,8 @@ cargo test
 cargo test --test openapi
 ```
 
-从干净 checkout 运行可重复的真实 Portal 变更 smoke（需要 Git、curl、jq、JDK 17 和稳定版 Rust
-工具链）：
+从干净 checkout 运行可重复的真实 Portal 变更 smoke（需要 Git、curl、jq、awk、
+`sha256sum` 或 `shasum`、JDK 17 和稳定版 Rust 工具链）：
 
 ```bash
 ./scripts/mutation-smoke.sh

@@ -342,7 +342,7 @@ if [[ "${actual_openapi_sha256}" != "${APOLLO_OPENAPI_SPEC_SHA256}" ]]; then
   fail "Apollo OpenAPI specification checksum did not match the pinned digest"
 fi
 (cd "${APOLLO_SOURCE_DIR}" && ./mvnw -B -ntp -q -pl apollo-assembly -am \
-  -DskipTests -Dapollo.openapi.spec.url="${OPENAPI_SPEC}" package)
+  -DskipTests -Dapollo.openapi.spec.url="${OPENAPI_SPEC}" clean package)
 
 ASSEMBLY_JAR=""
 while IFS= read -r candidate; do

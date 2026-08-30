@@ -468,8 +468,8 @@ Run focused OpenAPI command integration tests with the local mock HTTP server:
 cargo test --test openapi
 ```
 
-Run the repeatable real-Portal mutation smoke from a clean checkout (requires Git, curl, jq, JDK 17,
-and the stable Rust toolchain):
+Run the repeatable real-Portal mutation smoke from a clean checkout (requires Git, curl, jq, awk,
+`sha256sum` or `shasum`, JDK 17, and the stable Rust toolchain):
 
 ```bash
 ./scripts/mutation-smoke.sh
