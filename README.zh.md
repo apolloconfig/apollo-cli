@@ -283,7 +283,7 @@ namespace 创建只会在首次批准后发送只读预检请求。如果 Apollo
 
 table 和 JSON 输出都会给出源端与目标端 scope，以及 `create`、`update`、`delete`、`unchanged` 计数。JSON 约定还会返回 `strategy: "merge"` 和 `targetOnlyBehavior: "preserve"`。diff 结果、apply 计划和 apply 结果都不会包含配置 value。
 
-单独执行的 `config diff` 仅供参考，不会生成可供后续调用消费的计划制品。`config apply` 会自行捕获完整分页的源端快照，用这份快照调用 `items/diff`，并根据返回的变更集生成详细变更计划。批准后，CLI 会使用同一份已捕获的源端快照再次评估目标端；如果评估结果发生变化，命令会返回 `stale_plan`，且不会发送同步请求。如果所有变更计数均为零，命令会返回确定性的 `data.result: "no-op"` 成功结果，并且不会调用 `items/synchronize`。
+单独执行的 `config diff` 仅供参考，不会生成可供后续调用消费的计划制品。`config apply` 会自行捕获完整分页的源端快照，用这份快照调用 `items/diff`，同时捕获完整分页的目标端状态，并根据返回的变更集生成详细变更计划。批准后，CLI 会重新读取目标端，并使用同一份已捕获的源端快照再次评估；如果目标端配置状态或评估结果发生变化，命令会返回 `stale_plan`，且不会发送同步请求。首次批准有意发生在这些预检读取之前，第二次详细批准则确认实际变更计数。如果所有变更计数均为零，命令会返回确定性的 `data.result: "no-op"` 成功结果，并且不会调用 `items/synchronize`。
 
 ## OpenAPI 行为
 

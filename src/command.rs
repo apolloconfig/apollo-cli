@@ -1161,7 +1161,7 @@ fn execute_config(
             target_cluster,
             target_namespace,
         } => {
-            let sync_items = source_sync_items(&openapi, &scope)?;
+            let sync_items = config_sync_items(&openapi, &scope, ConfigSnapshotSide::Source)?;
             let body = sync_body(
                 &scope,
                 &target_env,
@@ -1207,7 +1207,7 @@ fn execute_config(
                     openapi.context.output,
                 ));
             }
-            let sync_items = source_sync_items(&openapi, &scope)?;
+            let sync_items = config_sync_items(&openapi, &scope, ConfigSnapshotSide::Source)?;
             let body = sync_body(
                 &scope,
                 &target_env,
@@ -1241,7 +1241,17 @@ fn execute_config(
                 ));
             }
 
+            let target_snapshot = config_sync_items(&openapi, &target, ConfigSnapshotSide::Target)?;
             let approved = prepare_mutation_with_openapi_context(cli, &openapi, detailed_plan)?;
+            let current_target_snapshot =
+                config_sync_items(&openapi, &target, ConfigSnapshotSide::Target)?;
+            if current_target_snapshot != target_snapshot {
+                return Err(CliError::stale_plan(
+                    "The target configuration changed after the apply plan was approved; no synchronize request was sent. Re-run the command to review a fresh plan.",
+                    approved.plan,
+                    openapi.context.output,
+                ));
+            }
             let current_assessment = request_config_diff(&openapi, &scope, &target, &body)?;
             if current_assessment != assessment {
                 return Err(CliError::stale_plan(
@@ -1256,6 +1266,8 @@ fn execute_config(
                 "operator",
                 operator.as_deref(),
             );
+            // Apollo Portal's v1 syncItems contract is ResponseEntity<Void>, so a successful HTTP
+            // status is the complete response contract; there is no per-target result envelope.
             let synchronize_response =
                 openapi
                     .client
@@ -2303,9 +2315,25 @@ fn item_path(scope: &NamespaceScopeArgs, key: &str) -> String {
     }
 }
 
-fn source_sync_items(
+#[derive(Clone, Copy)]
+enum ConfigSnapshotSide {
+    Source,
+    Target,
+}
+
+impl ConfigSnapshotSide {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Source => "source",
+            Self::Target => "target",
+        }
+    }
+}
+
+fn config_sync_items(
     openapi: &OpenApiCommandContext,
     scope: &NamespaceScopeArgs,
+    side: ConfigSnapshotSide,
 ) -> Result<Vec<Value>, CliError> {
     ensure_config_item_read_supported(openapi)?;
 
@@ -2324,13 +2352,17 @@ fn source_sync_items(
             &response.data,
             page,
             SYNC_ITEMS_PAGE_SIZE,
+            side,
             openapi.context.output,
         )?;
         if let Some(expected_total) = expected_total
             && expected_total != total
         {
             return Err(CliError::invalid_input(
-                "OpenAPI item pagination total changed while the source snapshot was being read",
+                &format!(
+                    "OpenAPI item pagination total changed while the {} snapshot was being read",
+                    side.label()
+                ),
                 openapi.context.output,
             ));
         }
@@ -2340,7 +2372,10 @@ fn source_sync_items(
 
         if items.len() as u64 > total {
             return Err(CliError::invalid_input(
-                "OpenAPI item pagination returned more source items than its declared total",
+                &format!(
+                    "OpenAPI item pagination returned more {} items than its declared total",
+                    side.label()
+                ),
                 openapi.context.output,
             ));
         }
@@ -2349,13 +2384,19 @@ fn source_sync_items(
         }
         if content_len != SYNC_ITEMS_PAGE_SIZE as usize {
             return Err(CliError::invalid_input(
-                "OpenAPI item pagination returned a partial source page before the declared total was reached",
+                &format!(
+                    "OpenAPI item pagination returned a partial {} page before the declared total was reached",
+                    side.label()
+                ),
                 openapi.context.output,
             ));
         }
         page = page.checked_add(1).ok_or_else(|| {
             CliError::invalid_input(
-                "OpenAPI item pagination exceeded the supported page range",
+                &format!(
+                    "OpenAPI item pagination for the {} snapshot exceeded the supported page range",
+                    side.label()
+                ),
                 openapi.context.output,
             )
         })?;
@@ -2368,6 +2409,7 @@ fn validated_item_page(
     data: &Value,
     expected_page: u32,
     expected_size: u32,
+    side: ConfigSnapshotSide,
     output: OutputFormat,
 ) -> Result<(Vec<Value>, u64), CliError> {
     let content = data
@@ -2401,13 +2443,19 @@ fn validated_item_page(
 
     if page != u64::from(expected_page) || size != u64::from(expected_size) {
         return Err(CliError::invalid_input(
-            "OpenAPI item list pagination metadata did not match the requested source page",
+            &format!(
+                "OpenAPI item list pagination metadata did not match the requested {} page",
+                side.label()
+            ),
             output,
         ));
     }
     if content.len() > expected_size as usize {
         return Err(CliError::invalid_input(
-            "OpenAPI item list response exceeded the requested source page size",
+            &format!(
+                "OpenAPI item list response exceeded the requested {} page size",
+                side.label()
+            ),
             output,
         ));
     }

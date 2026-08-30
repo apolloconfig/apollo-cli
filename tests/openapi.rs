@@ -11,6 +11,8 @@ use predicates::prelude::predicate;
 use serde_json::Value;
 use tempfile::TempDir;
 
+const EMPTY_ITEMS_PAGE: &str = r#"{"content":[],"page":0,"size":500,"total":0}"#;
+
 #[test]
 fn api_get_calls_openapi_with_consumer_token() {
     let server = TestServer::json(r#"[{"appId":"demo"}]"#);
@@ -2557,6 +2559,8 @@ fn config_apply_with_yes_uses_synchronize_endpoint() {
             "application/json",
             r#"[{"code":0,"message":"","namespace":{"appId":"demo","env":"FAT","clusterName":"default","namespaceName":"application"},"createItems":[{"key":"timeout","value":"3000"}],"updateItems":[],"deleteItems":[]}]"#,
         ),
+        (200, "application/json", EMPTY_ITEMS_PAGE),
+        (200, "application/json", EMPTY_ITEMS_PAGE),
         (
             200,
             "application/json",
@@ -2602,7 +2606,7 @@ fn config_apply_with_yes_uses_synchronize_endpoint() {
     assert_eq!(json["operation"]["changes"]["unchanged"], 0);
     assert_eq!(json["data"]["result"], "applied");
 
-    let requests = server.requests(4);
+    let requests = server.requests(6);
     assert_eq!(requests[0].method, "GET");
     assert_eq!(
         requests[0].path,
@@ -2613,19 +2617,29 @@ fn config_apply_with_yes_uses_synchronize_endpoint() {
         requests[1].path,
         "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/application/items/diff"
     );
-    assert_eq!(requests[2].method, "POST");
+    assert_eq!(requests[2].method, "GET");
     assert_eq!(
         requests[2].path,
-        "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/application/items/diff"
+        "/openapi/v1/envs/FAT/apps/demo/clusters/default/namespaces/application/items?page=0&size=500"
     );
-    assert_eq!(requests[3].method, "POST");
+    assert_eq!(requests[3].method, "GET");
     assert_eq!(
         requests[3].path,
+        "/openapi/v1/envs/FAT/apps/demo/clusters/default/namespaces/application/items?page=0&size=500"
+    );
+    assert_eq!(requests[4].method, "POST");
+    assert_eq!(
+        requests[4].path,
+        "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/application/items/diff"
+    );
+    assert_eq!(requests[5].method, "POST");
+    assert_eq!(
+        requests[5].path,
         "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/application/items/synchronize"
     );
-    assert_eq!(requests[1].body, requests[2].body);
-    assert_eq!(requests[2].body, requests[3].body);
-    let body: Value = serde_json::from_str(&requests[3].body).expect("json body");
+    assert_eq!(requests[1].body, requests[4].body);
+    assert_eq!(requests[4].body, requests[5].body);
+    let body: Value = serde_json::from_str(&requests[5].body).expect("json body");
     assert_eq!(body["syncToNamespaces"][0]["appId"], "demo");
     assert_eq!(body["syncToNamespaces"][0]["env"], "FAT");
     assert_eq!(body["syncToNamespaces"][0]["clusterName"], "default");
@@ -2644,6 +2658,8 @@ fn config_apply_table_shows_detailed_redacted_plan_before_mutation() {
             r#"{"content":[{"key":"plain-key","value":"source-secret"}],"page":0,"size":500,"total":1}"#,
         ),
         (200, "application/json", diff),
+        (200, "application/json", EMPTY_ITEMS_PAGE),
+        (200, "application/json", EMPTY_ITEMS_PAGE),
         (200, "application/json", diff),
         (200, "application/json", "{}"),
     ]);
@@ -2676,9 +2692,9 @@ fn config_apply_table_shows_detailed_redacted_plan_before_mutation() {
     assert!(!stderr.contains("plain-key"));
     assert!(!stderr.contains("source-secret"));
 
-    let requests = server.requests(4);
-    assert!(requests[2].path.ends_with("/items/diff"));
-    assert!(requests[3].path.ends_with("/items/synchronize"));
+    let requests = server.requests(6);
+    assert!(requests[4].path.ends_with("/items/diff"));
+    assert!(requests[5].path.ends_with("/items/synchronize"));
 }
 
 #[test]
@@ -3072,6 +3088,8 @@ fn config_apply_aborts_when_target_assessment_changes_after_approval() {
             "application/json",
             r#"[{"code":0,"message":"","namespace":{"appId":"demo","env":"FAT","clusterName":"default","namespaceName":"application"},"createItems":[{"key":"db.password","value":"source-secret"}],"updateItems":[],"deleteItems":[]}]"#,
         ),
+        (200, "application/json", EMPTY_ITEMS_PAGE),
+        (200, "application/json", EMPTY_ITEMS_PAGE),
         (
             200,
             "application/json",
@@ -3111,9 +3129,68 @@ fn config_apply_aborts_when_target_assessment_changes_after_approval() {
     assert!(!stderr.contains("source-secret"));
     assert!(!stderr.contains("db.password"));
 
-    let requests = server.requests(3);
+    let requests = server.requests(5);
     assert!(requests[1].path.ends_with("/items/diff"));
-    assert!(requests[2].path.ends_with("/items/diff"));
+    assert!(requests[4].path.ends_with("/items/diff"));
+}
+
+#[test]
+fn config_apply_aborts_when_target_value_changes_but_diff_classification_does_not() {
+    let diff = r#"[{"code":0,"message":"","namespace":{"appId":"demo","env":"FAT","clusterName":"default","namespaceName":"application"},"createItems":[],"updateItems":[{"key":"timeout","value":"source-secret"}],"deleteItems":[]}]"#;
+    let server = TestServer::sequence(vec![
+        (
+            200,
+            "application/json",
+            r#"{"content":[{"key":"timeout","value":"source-secret"}],"page":0,"size":500,"total":1}"#,
+        ),
+        (200, "application/json", diff),
+        (
+            200,
+            "application/json",
+            r#"{"content":[{"key":"timeout","value":"old-target-secret"}],"page":0,"size":500,"total":1}"#,
+        ),
+        (
+            200,
+            "application/json",
+            r#"{"content":[{"key":"timeout","value":"concurrent-target-secret"}],"page":0,"size":500,"total":1}"#,
+        ),
+    ]);
+    let home = temp_home();
+    write_config(
+        &home,
+        &profile_config_with_auth_mode(&server.url(), "user-token"),
+    );
+
+    let assert = base_command(&home)
+        .env("APOLLO_TOKEN", "apollo_pat_test_token")
+        .args([
+            "--yes",
+            "--output",
+            "json",
+            "config",
+            "apply",
+            "--env",
+            "DEV",
+            "--app",
+            "demo",
+            "--target-env",
+            "FAT",
+        ])
+        .assert()
+        .failure();
+
+    assert!(assert.get_output().stdout.is_empty());
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf8 stderr");
+    let json: Value = serde_json::from_str(&stderr).expect("stale-plan error json");
+    assert_eq!(json["error"]["code"], "stale_plan");
+    assert!(!stderr.contains("source-secret"));
+    assert!(!stderr.contains("old-target-secret"));
+    assert!(!stderr.contains("concurrent-target-secret"));
+
+    let requests = server.requests(4);
+    assert!(requests[1].path.ends_with("/items/diff"));
+    assert!(requests[2].path.contains("/envs/FAT/"));
+    assert!(requests[3].path.contains("/envs/FAT/"));
 }
 
 #[test]
@@ -3363,6 +3440,8 @@ fn config_apply_redacts_source_values_from_synchronize_errors() {
             r#"{"content":[{"key":"plain-key","value":"source-secret"}],"page":0,"size":500,"total":1}"#,
         ),
         (200, "application/json", diff),
+        (200, "application/json", EMPTY_ITEMS_PAGE),
+        (200, "application/json", EMPTY_ITEMS_PAGE),
         (200, "application/json", diff),
         (
             400,

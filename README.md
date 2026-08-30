@@ -342,10 +342,13 @@ apply result.
 
 A standalone `config diff` is advisory; it does not create a plan artifact for a later invocation.
 `config apply` captures its own fully paginated source snapshot, assesses that exact snapshot through
-`items/diff`, and builds the detailed mutation plan from the returned change set. After approval, it
-repeats the assessment with the same captured source snapshot. If the target assessment changed, the
-command returns `stale_plan` and sends no synchronize request. If all counts are zero, it returns the
-deterministic `data.result: "no-op"` success response without calling `items/synchronize`.
+`items/diff`, captures the fully paginated target state, and builds the detailed mutation plan from
+the returned change set. After approval, it reads the target again and repeats the assessment with
+the same captured source snapshot. If either the target item state or assessment changed, the
+command returns `stale_plan` and sends no synchronize request. The initial approval intentionally
+occurs before these preflight reads; the detailed approval covers the resulting change counts. If
+all counts are zero, the command returns the deterministic `data.result: "no-op"` success response
+without calling `items/synchronize`.
 
 ## OpenAPI behavior
 
