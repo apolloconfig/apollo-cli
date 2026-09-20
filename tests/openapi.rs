@@ -1370,6 +1370,46 @@ fn config_item_commands_use_encoded_items_for_path_sensitive_keys() {
 }
 
 #[test]
+fn user_token_config_delete_handles_plain_and_encoded_keys_without_operator() {
+    for (key, resource) in [
+        ("timeout", "items/timeout"),
+        ("logging/level", "encodedItems/bG9nZ2luZy9sZXZlbA"),
+        ("logging\\level", "encodedItems/bG9nZ2luZ1xsZXZlbA"),
+    ] {
+        let server = TestServer::empty();
+        let home = temp_home();
+        write_config(
+            &home,
+            &profile_config_with_auth_mode(&server.url(), "user-token"),
+        );
+
+        let output = base_command(&home)
+            .env("APOLLO_TOKEN", "apollo_pat_test_token")
+            .args([
+                "--yes", "--output", "json", "config", "delete", "--env", "DEV", "--app", "demo",
+                key,
+            ])
+            .assert()
+            .success();
+        let json: Value = serde_json::from_slice(&output.get_output().stdout).expect("delete JSON");
+        assert_eq!(json["operation"]["operation"], "config.delete");
+        assert_eq!(json["operation"]["key"], key);
+
+        let request = server.request();
+        assert_eq!(request.method, "DELETE");
+        assert_eq!(
+            request.path,
+            format!(
+                "/openapi/v1/envs/DEV/apps/demo/clusters/default/namespaces/application/{resource}"
+            )
+        );
+        assert!(request.headers.iter().any(|header| {
+            header.eq_ignore_ascii_case("authorization: Bearer apollo_pat_test_token")
+        }));
+    }
+}
+
+#[test]
 fn config_set_falls_back_to_create_when_update_reports_missing_item() {
     let server = TestServer::sequence(vec![
         (404, "application/json", r#"{"message":"item not found"}"#),
